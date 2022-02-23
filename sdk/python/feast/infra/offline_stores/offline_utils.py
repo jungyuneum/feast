@@ -21,7 +21,7 @@ from feast.infra.offline_stores.offline_store import OfflineStore
 from feast.infra.provider import _get_requested_feature_views_to_features_dict
 from feast.registry import Registry
 
-DEFAULT_ENTITY_DF_EVENT_TIMESTAMP_COL = "event_timestamp"
+DEFAULT_ENTITY_DF_EVENT_TIMESTAMP_COL = "update_dt"
 
 
 def infer_event_timestamp_from_entity_df(entity_schema: Dict[str, np.dtype]) -> str:
