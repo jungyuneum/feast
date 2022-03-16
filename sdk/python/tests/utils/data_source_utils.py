@@ -2,6 +2,7 @@ import contextlib
 import random
 import tempfile
 import time
+from typing import Iterator
 
 from google.cloud import bigquery
 
@@ -10,7 +11,7 @@ from feast.data_format import ParquetFormat
 
 
 @contextlib.contextmanager
-def prep_file_source(df, event_timestamp_column=None) -> FileSource:
+def prep_file_source(df, event_timestamp_column=None) -> Iterator[FileSource]:
     with tempfile.NamedTemporaryFile(suffix=".parquet") as f:
         f.close()
         df.to_parquet(f.name)
@@ -51,6 +52,7 @@ def simple_bq_source_using_query_arg(df, event_timestamp_column=None) -> BigQuer
         df, event_timestamp_column
     )
     return BigQuerySource(
+        name=bq_source_using_table_ref.table_ref,
         query=f"SELECT * FROM {bq_source_using_table_ref.table_ref}",
         event_timestamp_column=event_timestamp_column,
     )

@@ -20,7 +20,7 @@ from feast.errors import (
     FeastFeatureServerTypeSetError,
     FeastProviderNotSetError,
 )
-from feast.importer import get_class_from_type
+from feast.importer import import_class
 from feast.usage import log_exceptions
 
 # These dict exists so that:
@@ -31,17 +31,25 @@ ONLINE_STORE_CLASS_FOR_TYPE = {
     "datastore": "feast.infra.online_stores.datastore.DatastoreOnlineStore",
     "redis": "feast.infra.online_stores.redis.RedisOnlineStore",
     "dynamodb": "feast.infra.online_stores.dynamodb.DynamoDBOnlineStore",
+    "snowflake.online": "feast.infra.online_stores.snowflake.SnowflakeOnlineStore",
 }
 
 OFFLINE_STORE_CLASS_FOR_TYPE = {
     "file": "feast.infra.offline_stores.file.FileOfflineStore",
     "bigquery": "feast.infra.offline_stores.bigquery.BigQueryOfflineStore",
     "redshift": "feast.infra.offline_stores.redshift.RedshiftOfflineStore",
+    "snowflake.offline": "feast.infra.offline_stores.snowflake.SnowflakeOfflineStore",
+    "spark": "feast.infra.offline_stores.contrib.spark_offline_store.spark.SparkOfflineStore",
 }
 
 FEATURE_SERVER_CONFIG_CLASS_FOR_TYPE = {
     "aws_lambda": "feast.infra.feature_servers.aws_lambda.config.AwsLambdaFeatureServerConfig",
     "gcp_cloudrun": "feast.infra.feature_servers.gcp_cloudrun.config.GcpCloudRunFeatureServerConfig",
+}
+
+FEATURE_SERVER_TYPE_FOR_PROVIDER = {
+    "aws": "aws_lambda",
+    "gcp": "gcp_cloudrun",
 }
 
 
@@ -106,6 +114,8 @@ class RepoConfig(FeastBaseModel):
 
     repo_path: Optional[Path] = None
 
+    go_feature_server: Optional[bool] = False
+
     def __init__(self, **data: Any):
         super().__init__(**data)
 
@@ -147,8 +157,12 @@ class RepoConfig(FeastBaseModel):
         if "online_store" not in values:
             values["online_store"] = dict()
 
-        # Skip if we aren't creating the configuration from a dict
+        # Skip if we aren't creating the configuration from a dict or online store is null or it is a string like "None" or "null"
         if not isinstance(values["online_store"], Dict):
+            if isinstance(values["online_store"], str) and values[
+                "online_store"
+            ].lower() in {"none", "null"}:
+                values["online_store"] = None
             return values
 
         # Make sure that the provider configuration is set. We need it to set the defaults
@@ -226,15 +240,12 @@ class RepoConfig(FeastBaseModel):
         if "provider" not in values:
             raise FeastProviderNotSetError()
 
-        # Make sure that the type is not set, since we will set it based on the provider.
-        if "type" in values["feature_server"]:
-            raise FeastFeatureServerTypeSetError(values["feature_server"]["type"])
-
-        # Set the default type. We only support AWS Lambda for now.
-        if values["provider"] == "aws":
-            values["feature_server"]["type"] = "aws_lambda"
-
-        feature_server_type = values["feature_server"]["type"]
+        feature_server_type = FEATURE_SERVER_TYPE_FOR_PROVIDER.get(values["provider"])
+        defined_type = values["feature_server"].get("type")
+        # Make sure that the type is either not set, or set correctly, since it's defined by the provider
+        if defined_type not in (None, feature_server_type):
+            raise FeastFeatureServerTypeSetError(defined_type)
+        values["feature_server"]["type"] = feature_server_type
 
         # Validate the dict to ensure one of the union types match
         try:
@@ -300,7 +311,7 @@ class FeastConfigError(Exception):
 
 def get_data_source_class_from_type(data_source_type: str):
     module_name, config_class_name = data_source_type.rsplit(".", 1)
-    return get_class_from_type(module_name, config_class_name, "Source")
+    return import_class(module_name, config_class_name, "DataSource")
 
 
 def get_online_config_from_type(online_store_type: str):
@@ -311,7 +322,7 @@ def get_online_config_from_type(online_store_type: str):
     module_name, online_store_class_type = online_store_type.rsplit(".", 1)
     config_class_name = f"{online_store_class_type}Config"
 
-    return get_class_from_type(module_name, config_class_name, config_class_name)
+    return import_class(module_name, config_class_name, config_class_name)
 
 
 def get_offline_config_from_type(offline_store_type: str):
@@ -322,7 +333,7 @@ def get_offline_config_from_type(offline_store_type: str):
     module_name, offline_store_class_type = offline_store_type.rsplit(".", 1)
     config_class_name = f"{offline_store_class_type}Config"
 
-    return get_class_from_type(module_name, config_class_name, config_class_name)
+    return import_class(module_name, config_class_name, config_class_name)
 
 
 def get_feature_server_config_from_type(feature_server_type: str):
@@ -332,7 +343,7 @@ def get_feature_server_config_from_type(feature_server_type: str):
 
     feature_server_type = FEATURE_SERVER_CONFIG_CLASS_FOR_TYPE[feature_server_type]
     module_name, config_class_name = feature_server_type.rsplit(".", 1)
-    return get_class_from_type(module_name, config_class_name, config_class_name)
+    return import_class(module_name, config_class_name, config_class_name)
 
 
 def load_repo_config(repo_path: Path) -> RepoConfig:

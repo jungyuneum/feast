@@ -12,8 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import enum
+from typing import Type, Union
 
-from tensorflow_metadata.proto.v0 import schema_pb2
+from feast.protos.feast.types.Value_pb2 import (
+    BoolList,
+    BytesList,
+    DoubleList,
+    FloatList,
+    Int32List,
+    Int64List,
+    StringList,
+)
 
 
 class ValueType(enum.Enum):
@@ -40,28 +49,13 @@ class ValueType(enum.Enum):
     UNIX_TIMESTAMP_LIST = 18
     NULL = 19
 
-    def to_tfx_schema_feature_type(self):
-        if self.value in [
-            ValueType.BYTES.value,
-            ValueType.STRING.value,
-            ValueType.BOOL.value,
-            ValueType.BYTES_LIST.value,
-            ValueType.STRING_LIST.value,
-            ValueType.INT32_LIST.value,
-            ValueType.INT64_LIST.value,
-            ValueType.DOUBLE_LIST.value,
-            ValueType.FLOAT_LIST.value,
-            ValueType.BOOL_LIST.value,
-            ValueType.UNIX_TIMESTAMP_LIST.value,
-        ]:
-            return schema_pb2.FeatureType.BYTES
-        elif self.value in [
-            ValueType.INT32.value,
-            ValueType.INT64.value,
-            ValueType.UNIX_TIMESTAMP.value,
-        ]:
-            return schema_pb2.FeatureType.INT
-        elif self.value in [ValueType.DOUBLE.value, ValueType.FLOAT.value]:
-            return schema_pb2.FeatureType.FLOAT
-        else:
-            return schema_pb2.FeatureType.TYPE_UNKNOWN
+
+ListType = Union[
+    Type[BoolList],
+    Type[BytesList],
+    Type[DoubleList],
+    Type[FloatList],
+    Type[Int32List],
+    Type[Int64List],
+    Type[StringList],
+]

@@ -13,7 +13,8 @@
 # limitations under the License.
 import warnings
 from abc import ABC, abstractmethod
-from typing import List, Type
+from datetime import datetime
+from typing import List, Optional, Type
 
 from google.protobuf.json_format import MessageToJson
 from proto import Message
@@ -27,31 +28,16 @@ warnings.simplefilter("once", DeprecationWarning)
 class BaseFeatureView(ABC):
     """A FeatureView defines a logical grouping of features to be served."""
 
+    created_timestamp: Optional[datetime]
+    last_updated_timestamp: Optional[datetime]
+
     @abstractmethod
     def __init__(self, name: str, features: List[Feature]):
-        self._name = name
-        self._features = features
-        self._projection = FeatureViewProjection.from_definition(self)
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def features(self) -> List[Feature]:
-        return self._features
-
-    @features.setter
-    def features(self, value):
-        self._features = value
-
-    @property
-    def projection(self) -> FeatureViewProjection:
-        return self._projection
-
-    @projection.setter
-    def projection(self, value):
-        self._projection = value
+        self.name = name
+        self.features = features
+        self.projection = FeatureViewProjection.from_definition(self)
+        self.created_timestamp: Optional[datetime] = None
+        self.last_updated_timestamp: Optional[datetime] = None
 
     @property
     @abstractmethod

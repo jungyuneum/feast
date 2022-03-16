@@ -1,7 +1,6 @@
-import importlib
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, KeysView, List, Optional, Set, Tuple
 
 import numpy as np
@@ -12,14 +11,14 @@ from pandas import Timestamp
 import feast
 from feast.errors import (
     EntityTimestampInferenceException,
-    FeastClassImportError,
     FeastEntityDFMissingColumnsError,
-    FeastModuleImportError,
 )
 from feast.feature_view import FeatureView
+from feast.importer import import_class
 from feast.infra.offline_stores.offline_store import OfflineStore
 from feast.infra.provider import _get_requested_feature_views_to_features_dict
 from feast.registry import Registry
+from feast.utils import to_naive_utc
 
 DEFAULT_ENTITY_DF_EVENT_TIMESTAMP_COL = "update_dt"
 
@@ -86,10 +85,13 @@ class FeatureViewQueryContext:
     ttl: int
     entities: List[str]
     features: List[str]  # feature reference format
+    field_mapping: Dict[str, str]
     event_timestamp_column: str
     created_timestamp_column: Optional[str]
     table_subquery: str
     entity_selections: List[str]
+    min_event_timestamp: Optional[str]
+    max_event_timestamp: str
 
 
 def get_feature_view_query_context(
@@ -97,6 +99,7 @@ def get_feature_view_query_context(
     feature_views: List[FeatureView],
     registry: Registry,
     project: str,
+    entity_df_timestamp_range: Tuple[datetime, datetime],
 ) -> List[FeatureViewQueryContext]:
     """Build a query context containing all information required to template a BigQuery and Redshift point-in-time SQL query"""
 
@@ -130,11 +133,22 @@ def get_feature_view_query_context(
         event_timestamp_column = feature_view.input.event_timestamp_column
         created_timestamp_column = feature_view.input.created_timestamp_column
 
+        min_event_timestamp = None
+        if feature_view.ttl:
+            min_event_timestamp = to_naive_utc(
+                entity_df_timestamp_range[0] - feature_view.ttl
+            ).isoformat()
+
+        max_event_timestamp = to_naive_utc(entity_df_timestamp_range[1]).isoformat()
+
         context = FeatureViewQueryContext(
             name=feature_view.projection.name_to_use(),
             ttl=ttl_seconds,
             entities=join_keys,
-            features=features,
+            features=[
+                reverse_field_mapping.get(feature, feature) for feature in features
+            ],
+            field_mapping=feature_view.input.field_mapping,
             event_timestamp_column=reverse_field_mapping.get(
                 event_timestamp_column, event_timestamp_column
             ),
@@ -144,6 +158,8 @@ def get_feature_view_query_context(
             # TODO: Make created column optional and not hardcoded
             table_subquery=feature_view.input.get_table_query_string(),
             entity_selections=entity_selections,
+            min_event_timestamp=min_event_timestamp,
+            max_event_timestamp=max_event_timestamp,
         )
         query_context.append(context)
     return query_context
@@ -163,7 +179,11 @@ def build_point_in_time_query(
     final_output_feature_names = list(entity_df_columns)
     final_output_feature_names.extend(
         [
-            (f"{fv.name}__{feature}" if full_feature_names else feature)
+            (
+                f"{fv.name}__{fv.field_mapping.get(feature, feature)}"
+                if full_feature_names
+                else fv.field_mapping.get(feature, feature)
+            )
             for fv in feature_view_query_contexts
             for feature in fv.features
         ]
@@ -190,27 +210,10 @@ def get_temp_entity_table_name() -> str:
     return "feast_entity_df_" + uuid.uuid4().hex
 
 
-def get_offline_store_from_config(offline_store_config: Any,) -> OfflineStore:
-    """Get the offline store from offline store config"""
-
+def get_offline_store_from_config(offline_store_config: Any) -> OfflineStore:
+    """Creates an offline store corresponding to the given offline store config."""
     module_name = offline_store_config.__module__
     qualified_name = type(offline_store_config).__name__
-    store_class_name = qualified_name.replace("Config", "")
-    try:
-        module = importlib.import_module(module_name)
-    except Exception as e:
-        # The original exception can be anything - either module not found,
-        # or any other kind of error happening during the module import time.
-        # So we should include the original error as well in the stack trace.
-        raise FeastModuleImportError(module_name, "OfflineStore") from e
-
-    # Try getting the provider class definition
-    try:
-        offline_store_class = getattr(module, store_class_name)
-    except AttributeError:
-        # This can only be one type of error, when class_name attribute does not exist in the module
-        # So we don't have to include the original exception here
-        raise FeastClassImportError(
-            module_name, store_class_name, class_type="OfflineStore"
-        ) from None
+    class_name = qualified_name.replace("Config", "")
+    offline_store_class = import_class(module_name, class_name, "OfflineStore")
     return offline_store_class()

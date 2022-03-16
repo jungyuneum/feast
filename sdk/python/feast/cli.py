@@ -23,6 +23,7 @@ import yaml
 from colorama import Fore, Style
 
 from feast import flags, flags_helper, utils
+from feast.constants import DEFAULT_FEATURE_TRANSFORMATION_SERVER_PORT
 from feast.errors import FeastObjectNotFoundException, FeastProviderLoginError
 from feast.feature_store import FeatureStore
 from feast.feature_view import FeatureView
@@ -33,6 +34,7 @@ from feast.repo_operations import (
     cli_check_repo,
     generate_project_name,
     init_repo,
+    plan,
     registry_dump,
     teardown,
 )
@@ -83,6 +85,16 @@ def cli(ctx: click.Context, chdir: Optional[str], log_level: str):
             datefmt="%m/%d/%Y %I:%M:%S %p",
             level=level,
         )
+        # Override the logging level for already created loggers (due to loggers being created at the import time)
+        # Note, that format & datefmt does not need to be set, because by default child loggers don't override them
+
+        # Also note, that mypy complains that logging.root doesn't have "manager" because of the way it's written.
+        # So we have to put a type ignore hint for mypy.
+        for logger_name in logging.root.manager.loggerDict:  # type: ignore
+            if "feast" in logger_name:
+                logger = logging.getLogger(logger_name)
+                logger.setLevel(level)
+
     except Exception as e:
         raise e
     pass
@@ -112,6 +124,56 @@ def endpoint(ctx: click.Context):
         )
     else:
         _logger.info("There is no active feature server.")
+
+
+@cli.group(name="data-sources")
+def data_sources_cmd():
+    """
+    Access data sources
+    """
+    pass
+
+
+@data_sources_cmd.command("describe")
+@click.argument("name", type=click.STRING)
+@click.pass_context
+def data_source_describe(ctx: click.Context, name: str):
+    """
+    Describe a data source
+    """
+    repo = ctx.obj["CHDIR"]
+    cli_check_repo(repo)
+    store = FeatureStore(repo_path=str(repo))
+
+    try:
+        data_source = store.get_data_source(name)
+    except FeastObjectNotFoundException as e:
+        print(e)
+        exit(1)
+
+    print(
+        yaml.dump(
+            yaml.safe_load(str(data_source)), default_flow_style=False, sort_keys=False
+        )
+    )
+
+
+@data_sources_cmd.command(name="list")
+@click.pass_context
+def data_source_list(ctx: click.Context):
+    """
+    List all data sources
+    """
+    repo = ctx.obj["CHDIR"]
+    cli_check_repo(repo)
+    store = FeatureStore(repo_path=str(repo))
+    table = []
+    for datasource in store.list_data_sources():
+        table.append([datasource.name, datasource.__class__])
+
+    from tabulate import tabulate
+
+    print(tabulate(table, headers=["NAME", "CLASS"], tablefmt="plain"))
 
 
 @cli.group(name="entities")
@@ -272,9 +334,8 @@ def feature_view_list(ctx: click.Context):
         if isinstance(feature_view, FeatureView):
             entities.update(feature_view.entities)
         elif isinstance(feature_view, OnDemandFeatureView):
-            for backing_fv in feature_view.inputs.values():
-                if isinstance(backing_fv, FeatureView):
-                    entities.update(backing_fv.entities)
+            for backing_fv in feature_view.input_feature_view_projections.values():
+                entities.update(store.get_feature_view(backing_fv.name).entities)
         table.append(
             [
                 feature_view.name,
@@ -338,6 +399,26 @@ def on_demand_feature_view_list(ctx: click.Context):
     from tabulate import tabulate
 
     print(tabulate(table, headers=["NAME"], tablefmt="plain"))
+
+
+@cli.command("plan", cls=NoOptionDefaultFormat)
+@click.option(
+    "--skip-source-validation",
+    is_flag=True,
+    help="Don't validate the data sources by checking for that the tables exist.",
+)
+@click.pass_context
+def plan_command(ctx: click.Context, skip_source_validation: bool):
+    """
+    Create or update a feature store deployment
+    """
+    repo = ctx.obj["CHDIR"]
+    cli_check_repo(repo)
+    repo_config = load_repo_config(repo)
+    try:
+        plan(repo_config, repo, skip_source_validation)
+    except FeastProviderLoginError as e:
+        print(str(e))
 
 
 @cli.command("apply", cls=NoOptionDefaultFormat)
@@ -446,7 +527,9 @@ def materialize_incremental_command(ctx: click.Context, end_ts: str, views: List
 @click.option(
     "--template",
     "-t",
-    type=click.Choice(["local", "gcp", "aws"], case_sensitive=False),
+    type=click.Choice(
+        ["local", "gcp", "aws", "snowflake", "spark"], case_sensitive=False
+    ),
     help="Specify a template for the created project",
     default="local",
 )
@@ -463,21 +546,39 @@ def init_command(project_directory, minimal: bool, template: str):
 
 @cli.command("serve")
 @click.option(
-    "--port", "-p", type=click.INT, default=6566, help="Specify a port for the server"
+    "--host",
+    "-h",
+    type=click.STRING,
+    default="127.0.0.1",
+    help="Specify a host for the server [default: 127.0.0.1]",
+)
+@click.option(
+    "--port",
+    "-p",
+    type=click.INT,
+    default=6566,
+    help="Specify a port for the server [default: 6566]",
+)
+@click.option(
+    "--no-access-log", is_flag=True, help="Disable the Uvicorn access log.",
 )
 @click.pass_context
-def serve_command(ctx: click.Context, port: int):
-    """[Experimental] Start a the feature consumption server locally on a given port."""
+def serve_command(ctx: click.Context, host: str, port: int, no_access_log: bool):
+    """Start a feature server locally on a given port."""
     repo = ctx.obj["CHDIR"]
     cli_check_repo(repo)
     store = FeatureStore(repo_path=str(repo))
 
-    store.serve(port)
+    store.serve(host, port, no_access_log)
 
 
 @cli.command("serve_transformations")
 @click.option(
-    "--port", "-p", type=click.INT, default=6569, help="Specify a port for the server"
+    "--port",
+    "-p",
+    type=click.INT,
+    default=DEFAULT_FEATURE_TRANSFORMATION_SERVER_PORT,
+    help="Specify a port for the server",
 )
 @click.pass_context
 def serve_transformations_command(ctx: click.Context, port: int):

@@ -10,42 +10,42 @@ This guide will go over:
 
 ## Test suite overview
 
-Let's inspect the test setup as is:
+Let's inspect the test setup in `sdk/python/tests/integration`:
 
 ```bash
 $ tree
 
 .
 ├── e2e
-│   └── test_universal_e2e.py
+│   └── test_universal_e2e.py
 ├── feature_repos
-│   ├── repo_configuration.py
-│   └── universal
-│       ├── data_source_creator.py
-│       ├── data_sources
-│       │   ├── bigquery.py
-│       │   ├── file.py
-│       │   └── redshift.py
-│       ├── entities.py
-│       └── feature_views.py
+│   ├── repo_configuration.py
+│   └── universal
+│       ├── data_source_creator.py
+│       ├── data_sources
+│       │   ├── bigquery.py
+│       │   ├── file.py
+│       │   └── redshift.py
+│       ├── entities.py
+│       └── feature_views.py
 ├── offline_store
-│   ├── test_s3_custom_endpoint.py
-│   └── test_universal_historical_retrieval.py
+│   ├── test_s3_custom_endpoint.py
+│   └── test_universal_historical_retrieval.py
 ├── online_store
-│   ├── test_e2e_local.py
-│   ├── test_feature_service_read.py
-│   ├── test_online_retrieval.py
-│   └── test_universal_online.py
+│   ├── test_e2e_local.py
+│   ├── test_feature_service_read.py
+│   ├── test_online_retrieval.py
+│   └── test_universal_online.py
 ├── registration
-│   ├── test_cli.py
-│   ├── test_cli_apply_duplicated_featureview_names.py
-│   ├── test_cli_chdir.py
-│   ├── test_feature_service_apply.py
-│   ├── test_feature_store.py
-│   ├── test_inference.py
-│   ├── test_registry.py
-│   ├── test_universal_odfv_feature_inference.py
-│   └── test_universal_types.py
+│   ├── test_cli.py
+│   ├── test_cli_apply_duplicated_featureview_names.py
+│   ├── test_cli_chdir.py
+│   ├── test_feature_service_apply.py
+│   ├── test_feature_store.py
+│   ├── test_inference.py
+│   ├── test_registry.py
+│   ├── test_universal_odfv_feature_inference.py
+│   └── test_universal_types.py
 └── scaffolding
     ├── test_init.py
     ├── test_partial_apply.py
@@ -55,7 +55,7 @@ $ tree
 8 directories, 27 files
 ```
 
-`feature_repos` has setup files for most tests in the test suite and sets up pytest fixtures for other tests. Crucially, this parametrizes on different offline stores, different online stores, etc and abstracts away store specific implementations so tests don't need to rewrite e.g. uploading dataframes to a specific store for setup.
+`feature_repos` has setup files for most tests in the test suite and pytest fixtures for other tests. These fixtures parametrize on different offline stores, online stores, etc. and thus abstract away store specific implementations so tests don't need to rewrite e.g. uploading dataframes to a specific store for setup.
 
 ## Understanding an example test
 
@@ -79,7 +79,6 @@ def test_historical_features(environment, universal_data_sources, full_feature_n
         datasets["global"],
         datasets["entity"],
     )
-    
     # ... more test code
 
     customer_fv, driver_fv, driver_odfv, order_fv, global_fv = (
@@ -93,7 +92,7 @@ def test_historical_features(environment, universal_data_sources, full_feature_n
     feature_service = FeatureService(
         "convrate_plus100",
         features=[
-            feature_views["driver"][["conv_rate"]], 
+            feature_views["driver"][["conv_rate"]],
             feature_views["driver_odfv"]
         ],
     )
@@ -112,7 +111,6 @@ def test_historical_features(environment, universal_data_sources, full_feature_n
         ]
     )
     store.apply(feast_objects)
-
     # ... more test code
 
     job_from_df = store.get_historical_features(
@@ -132,13 +130,11 @@ def test_historical_features(environment, universal_data_sources, full_feature_n
         full_feature_names=full_feature_names,
     )
     actual_df_from_df_entities = job_from_df.to_df()
-
     # ... more test code
 
     assert_frame_equal(
         expected_df, actual_df_from_df_entities, check_dtype=False,
     )
-    
     # ... more test code
 ```
 {% endtab %}
@@ -148,26 +144,41 @@ The key fixtures are the `environment` and `universal_data_sources` fixtures, wh
 
 ## Writing a new test or reusing existing tests
 
-To:
+### To add a new test to an existing test file
 
-* Include a new offline store:&#x20;
-  * extend `data_source_creator.py` for your offline store
-  * in `repo_configuration.py` add a new`IntegrationTestRepoConfig` or two (depending on how many online stores you want to test)
-  * Run the full test suite with `make test-python-integration`
-  * See more guidelines at [https://github.com/feast-dev/feast/issues/1892](https://github.com/feast-dev/feast/issues/1892)
-* Include a new online store:
-  * in `repo_configuration.py` add a new config that maps to a serialized version of configuration you need in `feature_store.yaml` to setup the online store.
-  * in `repo_configuration.py`, add new`IntegrationTestRepoConfig` for offline stores you want to test
-  * Run the full test suite with `make test-python-integration`
-  * See more guidelines at [https://github.com/feast-dev/feast/issues/1892](https://github.com/feast-dev/feast/issues/1892)
-* Add a new test to an existing test file:
-  * Use the same function signatures as an existing test (e.g. have environment as an argument) to include the relevant test fixtures.&#x20;
-  * We prefer to expand what an individual test covers due to the cost of standing up offline / online stores
-* Using custom data in a new test:
-  * This is used in several places such as `test_universal_types.py`&#x20;
+* Use the same function signatures as an existing test (e.g. use `environment` as an argument) to include the relevant test fixtures.
+* If possible, expand an individual test instead of writing a new test, due to the cost of standing up offline / online stores.
+
+### To test a new offline / online store from a plugin repo
+
+* Install Feast in editable mode with `pip install -e`.
+* The core tests for offline / online store behavior are parametrized by the `FULL_REPO_CONFIGS` variable defined in `feature_repos/repo_configuration.py`. To overwrite this variable without modifying the Feast repo, create your own file that contains a `FULL_REPO_CONFIGS` (which will require adding a new `IntegrationTestRepoConfig` or two) and set the environment variable `FULL_REPO_CONFIGS_MODULE` to point to that file. Then the core offline / online store tests can be run with `make test-python-universal`.
+* See the [custom offline store demo](https://github.com/feast-dev/feast-custom-offline-store-demo) and the [custom online store demo](https://github.com/feast-dev/feast-custom-online-store-demo) for examples.
+
+### To include a new offline / online store in the main Feast repo
+
+* Extend `data_source_creator.py` for your offline store.
+* In `repo_configuration.py` add a new`IntegrationTestRepoConfig` or two (depending on how many online stores you want to test).
+* Run the full test suite with `make test-python-integration.`
+
+### Including a new offline / online store in the main Feast repo from external plugins with community maintainers.
+
+* This folder is for plugins that are officially maintained with community owners. Place the APIs in feast/infra/offline_stores/contrib/.
+* Extend `data_source_creator.py` for your offline store and implement the required APIs.
+* In `contrib_repo_configuration.py` add a new `IntegrationTestRepoConfig` (depending on how many online stores you want to test).
+* Run the test suite on the contrib test suite with `make test-python-contrib-universal`.
+
+### To include a new online store
+
+* In `repo_configuration.py` add a new config that maps to a serialized version of configuration you need in `feature_store.yaml` to setup the online store.
+* In `repo_configuration.py`, add new`IntegrationTestRepoConfig` for offline stores you want to test.
+* Run the full test suite with `make test-python-integration`
+
+### To use custom data in a new test
+
+* Check `test_universal_types.py` for an example of how to do this.
 
 ```python
-
 @pytest.mark.integration
 def your_test(environment: Environment):
     df = #...#
@@ -178,6 +189,23 @@ def your_test(environment: Environment):
     your_fv = driver_feature_view(data_source)
     entity = driver(value_type=ValueType.UNKNOWN)
     fs.apply([fv, entity])
-    
+
     # ... run test
 ```
+
+### Running your own redis cluster for testing
+
+* Install redis on your computer. If you are a mac user, you should be able to `brew install redis`.
+    * Running `redis-server --help` and `redis-cli --help` should show corresponding help menus.
+* Run `cd scripts/create-cluster` and run `./create-cluster start` then `./create-cluster create` to start the server. You should see output that looks like this:
+~~~~
+Starting 6001
+Starting 6002
+Starting 6003
+Starting 6004
+Starting 6005
+Starting 6006
+~~~~
+* You should be able to run the integration tests and have the redis cluster tests pass.
+* If you would like to run your own redis cluster, you can run the above commands with your own specified ports and connect to the newly configured cluster.
+* To stop the cluster, run `./create-cluster stop` and then `./create-cluster clean`.
