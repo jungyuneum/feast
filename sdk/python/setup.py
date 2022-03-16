@@ -33,9 +33,9 @@ except ImportError:
     from distutils.command.install import install
     from distutils.command.build_py import build_py
 
-NAME = "feast"
+NAME = "mk-feature-store"
 DESCRIPTION = "Python SDK for Feast"
-URL = "https://github.com/jungyuneum/feast"
+URL = "https://github.com/jungyuneum/feature-store/feast-postgres/feast"
 AUTHOR = "Feast"
 REQUIRES_PYTHON = ">=3.7.0"
 
@@ -230,7 +230,8 @@ setup(
         "Programming Language :: Python :: 3.7",
     ],
     entry_points={"console_scripts": ["feast=feast.cli:cli"]},
-    use_scm_version=use_scm_version,
+    version="0.14.2",
+    #use_scm_version=use_scm_version,
     setup_requires=["setuptools_scm", "grpcio", "grpcio-tools==1.34.0", "mypy-protobuf", "sphinx!=4.0.0"],
     package_data={
         "": [
