@@ -17,12 +17,20 @@ from tests.integration.feature_repos.universal.feature_views import driver_featu
 def test_e2e_consistency(environment, e2e_data_sources, infer_features):
     fs = environment.feature_store
     df, data_source = e2e_data_sources
-    fv = driver_feature_view(data_source=data_source, infer_features=infer_features)
+    fv = driver_feature_view(
+        name=f"test_consistency_{'with_inference' if infer_features else ''}",
+        data_source=data_source,
+        infer_features=infer_features,
+    )
 
     entity = driver()
     fs.apply([fv, entity])
 
-    run_offline_online_store_consistency_test(fs, fv)
+    # materialization is run in two steps and
+    # we use timestamp from generated dataframe as a split point
+    split_dt = df["ts_1"][4].to_pydatetime() - timedelta(seconds=1)
+
+    run_offline_online_store_consistency_test(fs, fv, split_dt)
 
 
 def check_offline_and_online_features(
@@ -43,12 +51,16 @@ def check_offline_and_online_features(
 
     if full_feature_names:
         if expected_value:
-            assert abs(response_dict[f"{fv.name}__value"][0] - expected_value) < 1e-6
+            assert (
+                abs(response_dict[f"{fv.name}__value"][0] - expected_value) < 1e-6
+            ), f"Response: {response_dict}, Expected: {expected_value}"
         else:
             assert response_dict[f"{fv.name}__value"][0] is None
     else:
         if expected_value:
-            assert abs(response_dict["value"][0] - expected_value) < 1e-6
+            assert (
+                abs(response_dict["value"][0] - expected_value) < 1e-6
+            ), f"Response: {response_dict}, Expected: {expected_value}"
         else:
             assert response_dict["value"][0] is None
 
@@ -64,20 +76,32 @@ def check_offline_and_online_features(
 
         if full_feature_names:
             if expected_value:
-                assert abs(df.to_dict()[f"{fv.name}__value"][0] - expected_value) < 1e-6
+                assert (
+                    abs(
+                        df.to_dict(orient="list")[f"{fv.name}__value"][0]
+                        - expected_value
+                    )
+                    < 1e-6
+                )
             else:
-                assert math.isnan(df.to_dict()[f"{fv.name}__value"][0])
+                assert not df.to_dict(orient="list")[f"{fv.name}__value"] or math.isnan(
+                    df.to_dict(orient="list")[f"{fv.name}__value"][0]
+                )
         else:
             if expected_value:
-                assert abs(df.to_dict()["value"][0] - expected_value) < 1e-6
+                assert (
+                    abs(df.to_dict(orient="list")["value"][0] - expected_value) < 1e-6
+                )
             else:
-                assert math.isnan(df.to_dict()["value"][0])
+                assert not df.to_dict(orient="list")["value"] or math.isnan(
+                    df.to_dict(orient="list")["value"][0]
+                )
 
 
 def run_offline_online_store_consistency_test(
-    fs: FeatureStore, fv: FeatureView
+    fs: FeatureStore, fv: FeatureView, split_dt: datetime
 ) -> None:
-    now = datetime.now()
+    now = datetime.utcnow()
 
     full_feature_names = True
     check_offline_store: bool = True
@@ -85,7 +109,7 @@ def run_offline_online_store_consistency_test(
     # Run materialize()
     # use both tz-naive & tz-aware timestamps to test that they're both correctly handled
     start_date = (now - timedelta(hours=5)).replace(tzinfo=utc)
-    end_date = now - timedelta(hours=2)
+    end_date = split_dt
     fs.materialize(feature_views=[fv.name], start_date=start_date, end_date=end_date)
 
     # check result of materialize()

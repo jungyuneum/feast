@@ -5,6 +5,8 @@ on: [push, pull_request]
 jobs:
   lint-python:
     runs-on: [ubuntu-latest]
+    env:
+      PYTHON: 3.7
     steps:
       - uses: actions/checkout@v2
       - name: Setup Python
@@ -13,6 +15,11 @@ jobs:
         with:
           python-version: "3.7"
           architecture: x64
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17.7
       - name: Upgrade pip version
         run: |
           pip install --upgrade "pip>=21.3.1"
@@ -27,20 +34,36 @@ jobs:
             ${{ steps.pip-cache.outputs.dir }}
             /opt/hostedtoolcache/Python
             /Users/runner/hostedtoolcache/Python
-          key: ${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-pip-${{ hashFiles('**/setup.py') }}
+          key: ${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-pip-${{ hashFiles(format('**/py{0}-ci-requirements.txt', env.PYTHON)) }}
           restore-keys: |
             ${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-pip-
+      - name: Install pip-tools
+        run: pip install pip-tools
       - name: Install dependencies
-        run: make install-python-ci-dependencies
+        run: |
+          make compile-protos-go
+          make install-python-ci-dependencies
       - name: Lint python
         run: make lint-python
 
   lint-go:
-    container: gcr.io/kf-feast/feast-ci:latest
-    runs-on: [ubuntu-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17.7
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.7
+      - name: Upgrade pip version
+        run: |
+          pip install --upgrade "pip>=21.3.1"
       - name: Install dependencies
-        run: make install-go-ci-dependencies
+        run:  make install-go-proto-dependencies
       - name: Lint go
         run: make lint-go

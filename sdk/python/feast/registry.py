@@ -11,33 +11,45 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import json
+import logging
+from collections import defaultdict
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from threading import Lock
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 
+import dill
 from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
+from google.protobuf.json_format import MessageToJson
 from proto import Message
 
-from feast import importer
 from feast.base_feature_view import BaseFeatureView
+from feast.data_source import DataSource
 from feast.entity import Entity
 from feast.errors import (
     ConflictingFeatureViewNames,
+    DataSourceNotFoundException,
+    DataSourceObjectNotFoundException,
     EntityNotFoundException,
     FeatureServiceNotFoundException,
-    FeatureTableNotFoundException,
     FeatureViewNotFoundException,
     OnDemandFeatureViewNotFoundException,
+    SavedDatasetNotFound,
 )
 from feast.feature_service import FeatureService
-from feast.feature_table import FeatureTable
 from feast.feature_view import FeatureView
+from feast.importer import import_class
+from feast.infra.infra_object import Infra
 from feast.on_demand_feature_view import OnDemandFeatureView
 from feast.protos.feast.core.Registry_pb2 import Registry as RegistryProto
+from feast.registry_store import NoopRegistryStore
 from feast.repo_config import RegistryConfig
+from feast.repo_contents import RepoContents
 from feast.request_feature_view import RequestFeatureView
+from feast.saved_dataset import SavedDataset
 
 REGISTRY_SCHEMA_VERSION = "1"
 
@@ -56,6 +68,53 @@ REGISTRY_STORE_CLASS_FOR_SCHEME = {
 }
 
 
+class FeastObjectType(Enum):
+    DATA_SOURCE = "data source"
+    ENTITY = "entity"
+    FEATURE_VIEW = "feature view"
+    ON_DEMAND_FEATURE_VIEW = "on demand feature view"
+    REQUEST_FEATURE_VIEW = "request feature view"
+    FEATURE_SERVICE = "feature service"
+
+    @staticmethod
+    def get_objects_from_registry(
+        registry: "Registry", project: str
+    ) -> Dict["FeastObjectType", List[Any]]:
+        return {
+            FeastObjectType.DATA_SOURCE: registry.list_data_sources(project=project),
+            FeastObjectType.ENTITY: registry.list_entities(project=project),
+            FeastObjectType.FEATURE_VIEW: registry.list_feature_views(project=project),
+            FeastObjectType.ON_DEMAND_FEATURE_VIEW: registry.list_on_demand_feature_views(
+                project=project
+            ),
+            FeastObjectType.REQUEST_FEATURE_VIEW: registry.list_request_feature_views(
+                project=project
+            ),
+            FeastObjectType.FEATURE_SERVICE: registry.list_feature_services(
+                project=project
+            ),
+        }
+
+    @staticmethod
+    def get_objects_from_repo_contents(
+        repo_contents: RepoContents,
+    ) -> Dict["FeastObjectType", Set[Any]]:
+        return {
+            FeastObjectType.DATA_SOURCE: repo_contents.data_sources,
+            FeastObjectType.ENTITY: repo_contents.entities,
+            FeastObjectType.FEATURE_VIEW: repo_contents.feature_views,
+            FeastObjectType.ON_DEMAND_FEATURE_VIEW: repo_contents.on_demand_feature_views,
+            FeastObjectType.REQUEST_FEATURE_VIEW: repo_contents.request_feature_views,
+            FeastObjectType.FEATURE_SERVICE: repo_contents.feature_services,
+        }
+
+
+FEAST_OBJECT_TYPES = [feast_object_type for feast_object_type in FeastObjectType]
+
+
+logger = logging.getLogger(__name__)
+
+
 def get_registry_store_class_from_type(registry_store_type: str):
     if not registry_store_type.endswith("RegistryStore"):
         raise Exception('Registry store class name should end with "RegistryStore"')
@@ -63,9 +122,7 @@ def get_registry_store_class_from_type(registry_store_type: str):
         registry_store_type = REGISTRY_STORE_CLASS_FOR_TYPE[registry_store_type]
     module_name, registry_store_class_name = registry_store_type.rsplit(".", 1)
 
-    return importer.get_class_from_type(
-        module_name, registry_store_class_name, "RegistryStore"
-    )
+    return import_class(module_name, registry_store_class_name, "RegistryStore")
 
 
 def get_registry_store_class_from_scheme(registry_path: str):
@@ -91,9 +148,10 @@ class Registry:
     cached_registry_proto: Optional[RegistryProto] = None
     cached_registry_proto_created: Optional[datetime] = None
     cached_registry_proto_ttl: timedelta
-    cache_being_updated: bool = False
 
-    def __init__(self, registry_config: RegistryConfig, repo_path: Path):
+    def __init__(
+        self, registry_config: Optional[RegistryConfig], repo_path: Optional[Path]
+    ):
         """
         Create the Registry object.
 
@@ -102,19 +160,35 @@ class Registry:
             repo_path: Path to the base of the Feast repository
             or where it will be created if it does not exist yet.
         """
-        registry_store_type = registry_config.registry_store_type
-        registry_path = registry_config.path
-        if registry_store_type is None:
-            cls = get_registry_store_class_from_scheme(registry_path)
-        else:
-            cls = get_registry_store_class_from_type(str(registry_store_type))
 
-        self._registry_store = cls(registry_config, repo_path)
-        self.cached_registry_proto_ttl = timedelta(
-            seconds=registry_config.cache_ttl_seconds
-            if registry_config.cache_ttl_seconds is not None
-            else 0
+        self._refresh_lock = Lock()
+
+        if registry_config:
+            registry_store_type = registry_config.registry_store_type
+            registry_path = registry_config.path
+            if registry_store_type is None:
+                cls = get_registry_store_class_from_scheme(registry_path)
+            else:
+                cls = get_registry_store_class_from_type(str(registry_store_type))
+
+            self._registry_store = cls(registry_config, repo_path)
+            self.cached_registry_proto_ttl = timedelta(
+                seconds=registry_config.cache_ttl_seconds
+                if registry_config.cache_ttl_seconds is not None
+                else 0
+            )
+
+    def clone(self) -> "Registry":
+        new_registry = Registry(None, None)
+        new_registry.cached_registry_proto_ttl = timedelta(seconds=0)
+        new_registry.cached_registry_proto = (
+            self.cached_registry_proto.__deepcopy__()
+            if self.cached_registry_proto
+            else RegistryProto()
         )
+        new_registry.cached_registry_proto_created = datetime.utcnow()
+        new_registry._registry_store = NoopRegistryStore()
+        return new_registry
 
     def _initialize_registry(self):
         """Explicitly initializes the registry with an empty proto if it doesn't exist."""
@@ -124,6 +198,36 @@ class Registry:
             registry_proto = RegistryProto()
             registry_proto.registry_schema_version = REGISTRY_SCHEMA_VERSION
             self._registry_store.update_registry_proto(registry_proto)
+
+    def update_infra(self, infra: Infra, project: str, commit: bool = True):
+        """
+        Updates the stored Infra object.
+
+        Args:
+            infra: The new Infra object to be stored.
+            project: Feast project that the Infra object refers to
+            commit: Whether the change should be persisted immediately
+        """
+        self._prepare_registry_for_changes()
+        assert self.cached_registry_proto
+
+        self.cached_registry_proto.infra.CopyFrom(infra.to_proto())
+        if commit:
+            self.commit()
+
+    def get_infra(self, project: str, allow_cache: bool = False) -> Infra:
+        """
+        Retrieves the stored Infra object.
+
+        Args:
+            project: Feast project that the Infra object refers to
+            allow_cache: Whether to allow returning this entity from a cached registry
+
+        Returns:
+            The stored Infra object.
+        """
+        registry_proto = self._get_registry_proto(allow_cache=allow_cache)
+        return Infra.from_proto(registry_proto.infra)
 
     def apply_entity(self, entity: Entity, project: str, commit: bool = True):
         """
@@ -135,6 +239,12 @@ class Registry:
             commit: Whether the change should be persisted immediately
         """
         entity.is_valid()
+
+        now = datetime.utcnow()
+        if not entity.created_timestamp:
+            entity.created_timestamp = now
+        entity.last_updated_timestamp = now
+
         entity_proto = entity.to_proto()
         entity_proto.spec.project = project
         self._prepare_registry_for_changes()
@@ -172,6 +282,70 @@ class Registry:
                 entities.append(Entity.from_proto(entity_proto))
         return entities
 
+    def list_data_sources(
+        self, project: str, allow_cache: bool = False
+    ) -> List[DataSource]:
+        """
+        Retrieve a list of data sources from the registry
+
+        Args:
+            project: Filter data source based on project name
+            allow_cache: Whether to allow returning data sources from a cached registry
+
+        Returns:
+            List of data sources
+        """
+        registry_proto = self._get_registry_proto(allow_cache=allow_cache)
+        data_sources = []
+        for data_source_proto in registry_proto.data_sources:
+            if data_source_proto.project == project:
+                data_sources.append(DataSource.from_proto(data_source_proto))
+        return data_sources
+
+    def apply_data_source(
+        self, data_source: DataSource, project: str, commit: bool = True
+    ):
+        """
+        Registers a single data source with Feast
+
+        Args:
+            data_source: A data source that will be registered
+            project: Feast project that this data source belongs to
+            commit: Whether to immediately commit to the registry
+        """
+        registry = self._prepare_registry_for_changes()
+
+        for idx, existing_data_source_proto in enumerate(registry.data_sources):
+            if existing_data_source_proto.name == data_source.name:
+                del registry.data_sources[idx]
+        data_source_proto = data_source.to_proto()
+        data_source_proto.project = project
+        registry.data_sources.append(data_source_proto)
+        if commit:
+            self.commit()
+
+    def delete_data_source(self, name: str, project: str, commit: bool = True):
+        """
+        Deletes a data source or raises an exception if not found.
+
+        Args:
+            name: Name of data source
+            project: Feast project that this data source belongs to
+            commit: Whether the change should be persisted immediately
+        """
+        self._prepare_registry_for_changes()
+        assert self.cached_registry_proto
+
+        for idx, data_source_proto in enumerate(
+            self.cached_registry_proto.data_sources
+        ):
+            if data_source_proto.name == name:
+                del self.cached_registry_proto.data_sources[idx]
+                if commit:
+                    self.commit()
+                return
+        raise DataSourceNotFoundException(name)
+
     def apply_feature_service(
         self, feature_service: FeatureService, project: str, commit: bool = True
     ):
@@ -182,6 +356,11 @@ class Registry:
             feature_service: A feature service that will be registered
             project: Feast project that this entity belongs to
         """
+        now = datetime.utcnow()
+        if not feature_service.created_timestamp:
+            feature_service.created_timestamp = now
+        feature_service.last_updated_timestamp = now
+
         feature_service_proto = feature_service.to_proto()
         feature_service_proto.spec.project = project
 
@@ -230,6 +409,7 @@ class Registry:
         Args:
             name: Name of feature service
             project: Feast project that this feature service belongs to
+            allow_cache: Whether to allow returning this feature service from a cached registry
 
         Returns:
             Returns either the specified feature service, or raises an exception if
@@ -252,6 +432,7 @@ class Registry:
         Args:
             name: Name of entity
             project: Feast project that this entity belongs to
+            allow_cache: Whether to allow returning this entity from a cached registry
 
         Returns:
             Returns either the specified entity, or raises an exception if
@@ -262,37 +443,6 @@ class Registry:
             if entity_proto.spec.name == name and entity_proto.spec.project == project:
                 return Entity.from_proto(entity_proto)
         raise EntityNotFoundException(name, project=project)
-
-    def apply_feature_table(
-        self, feature_table: FeatureTable, project: str, commit: bool = True
-    ):
-        """
-        Registers a single feature table with Feast
-
-        Args:
-            feature_table: Feature table that will be registered
-            project: Feast project that this feature table belongs to
-            commit: Whether the change should be persisted immediately
-        """
-        feature_table.is_valid()
-        feature_table_proto = feature_table.to_proto()
-        feature_table_proto.spec.project = project
-        self._prepare_registry_for_changes()
-        assert self.cached_registry_proto
-
-        for idx, existing_feature_table_proto in enumerate(
-            self.cached_registry_proto.feature_tables
-        ):
-            if (
-                existing_feature_table_proto.spec.name == feature_table_proto.spec.name
-                and existing_feature_table_proto.spec.project == project
-            ):
-                del self.cached_registry_proto.feature_tables[idx]
-                break
-
-        self.cached_registry_proto.feature_tables.append(feature_table_proto)
-        if commit:
-            self.commit()
 
     def apply_feature_view(
         self, feature_view: BaseFeatureView, project: str, commit: bool = True
@@ -306,6 +456,12 @@ class Registry:
             commit: Whether the change should be persisted immediately
         """
         feature_view.ensure_valid()
+
+        now = datetime.utcnow()
+        if not feature_view.created_timestamp:
+            feature_view.created_timestamp = now
+        feature_view.last_updated_timestamp = now
+
         feature_view_proto = feature_view.to_proto()
         feature_view_proto.spec.project = project
         self._prepare_registry_for_changes()
@@ -341,7 +497,7 @@ class Registry:
                 ):
                     return
                 else:
-                    del self.cached_registry_proto.feature_views[idx]
+                    del existing_feature_views_of_same_type[idx]
                     break
 
         existing_feature_views_of_same_type.append(feature_view_proto)
@@ -355,8 +511,8 @@ class Registry:
         Retrieve a list of on demand feature views from the registry
 
         Args:
-            allow_cache: Whether to allow returning on demand feature views from a cached registry
             project: Filter on demand feature views based on project name
+            allow_cache: Whether to allow returning on demand feature views from a cached registry
 
         Returns:
             List of on demand feature views
@@ -379,7 +535,8 @@ class Registry:
 
         Args:
             name: Name of on demand feature view
-            project: Feast project that this on demand feature  belongs to
+            project: Feast project that this on demand feature view belongs to
+            allow_cache: Whether to allow returning this on demand feature view from a cached registry
 
         Returns:
             Returns either the specified on demand feature view, or raises an exception if
@@ -394,6 +551,27 @@ class Registry:
             ):
                 return OnDemandFeatureView.from_proto(on_demand_feature_view)
         raise OnDemandFeatureViewNotFoundException(name, project=project)
+
+    def get_data_source(
+        self, name: str, project: str, allow_cache: bool = False
+    ) -> DataSource:
+        """
+        Retrieves a data source.
+
+        Args:
+            name: Name of data source
+            project: Feast project that this data source belongs to
+            allow_cache: Whether to allow returning this data source from a cached registry
+
+        Returns:
+            Returns either the specified data source, or raises an exception if none is found
+        """
+        registry = self._get_registry_proto(allow_cache=allow_cache)
+
+        for data_source in registry.data_sources:
+            if data_source.project == project and data_source.name == name:
+                return DataSource.from_proto(data_source)
+        raise DataSourceObjectNotFoundException(name, project=project)
 
     def apply_materialization(
         self,
@@ -429,6 +607,7 @@ class Registry:
                 existing_feature_view.materialization_intervals.append(
                     (start_date, end_date)
                 )
+                existing_feature_view.last_updated_timestamp = datetime.utcnow()
                 feature_view_proto = existing_feature_view.to_proto()
                 feature_view_proto.spec.project = project
                 del self.cached_registry_proto.feature_views[idx]
@@ -438,23 +617,6 @@ class Registry:
                 return
 
         raise FeatureViewNotFoundException(feature_view.name, project)
-
-    def list_feature_tables(self, project: str) -> List[FeatureTable]:
-        """
-        Retrieve a list of feature tables from the registry
-
-        Args:
-            project: Filter feature tables based on project name
-
-        Returns:
-            List of feature tables
-        """
-        registry_proto = self._get_registry_proto()
-        feature_tables = []
-        for feature_table_proto in registry_proto.feature_tables:
-            if feature_table_proto.spec.project == project:
-                feature_tables.append(FeatureTable.from_proto(feature_table_proto))
-        return feature_tables
 
     def list_feature_views(
         self, project: str, allow_cache: bool = False
@@ -498,40 +660,22 @@ class Registry:
                 )
         return feature_views
 
-    def get_feature_table(self, name: str, project: str) -> FeatureTable:
-        """
-        Retrieves a feature table.
-
-        Args:
-            name: Name of feature table
-            project: Feast project that this feature table belongs to
-
-        Returns:
-            Returns either the specified feature table, or raises an exception if
-            none is found
-        """
-        registry_proto = self._get_registry_proto()
-        for feature_table_proto in registry_proto.feature_tables:
-            if (
-                feature_table_proto.spec.name == name
-                and feature_table_proto.spec.project == project
-            ):
-                return FeatureTable.from_proto(feature_table_proto)
-        raise FeatureTableNotFoundException(name, project)
-
-    def get_feature_view(self, name: str, project: str) -> FeatureView:
+    def get_feature_view(
+        self, name: str, project: str, allow_cache: bool = False
+    ) -> FeatureView:
         """
         Retrieves a feature view.
 
         Args:
             name: Name of feature view
             project: Feast project that this feature view belongs to
+            allow_cache: Allow returning feature view from the cached registry
 
         Returns:
             Returns either the specified feature view, or raises an exception if
             none is found
         """
-        registry_proto = self._get_registry_proto()
+        registry_proto = self._get_registry_proto(allow_cache=allow_cache)
         for feature_view_proto in registry_proto.feature_views:
             if (
                 feature_view_proto.spec.name == name
@@ -564,32 +708,6 @@ class Registry:
                     self.commit()
                 return
         raise FeatureServiceNotFoundException(name, project)
-
-    def delete_feature_table(self, name: str, project: str, commit: bool = True):
-        """
-        Deletes a feature table or raises an exception if not found.
-
-        Args:
-            name: Name of feature table
-            project: Feast project that this feature table belongs to
-            commit: Whether the change should be persisted immediately
-        """
-        self._prepare_registry_for_changes()
-        assert self.cached_registry_proto
-
-        for idx, existing_feature_table_proto in enumerate(
-            self.cached_registry_proto.feature_tables
-        ):
-            if (
-                existing_feature_table_proto.spec.name == name
-                and existing_feature_table_proto.spec.project == project
-            ):
-                del self.cached_registry_proto.feature_tables[idx]
-                if commit:
-                    self.commit()
-                return
-
-        raise FeatureTableNotFoundException(name, project)
 
     def delete_feature_view(self, name: str, project: str, commit: bool = True):
         """
@@ -627,7 +745,124 @@ class Registry:
                     self.commit()
                 return
 
+        for idx, existing_on_demand_feature_view_proto in enumerate(
+            self.cached_registry_proto.on_demand_feature_views
+        ):
+            if (
+                existing_on_demand_feature_view_proto.spec.name == name
+                and existing_on_demand_feature_view_proto.spec.project == project
+            ):
+                del self.cached_registry_proto.on_demand_feature_views[idx]
+                if commit:
+                    self.commit()
+                return
+
         raise FeatureViewNotFoundException(name, project)
+
+    def delete_entity(self, name: str, project: str, commit: bool = True):
+        """
+        Deletes an entity or raises an exception if not found.
+
+        Args:
+            name: Name of entity
+            project: Feast project that this entity belongs to
+            commit: Whether the change should be persisted immediately
+        """
+        self._prepare_registry_for_changes()
+        assert self.cached_registry_proto
+
+        for idx, existing_entity_proto in enumerate(
+            self.cached_registry_proto.entities
+        ):
+            if (
+                existing_entity_proto.spec.name == name
+                and existing_entity_proto.spec.project == project
+            ):
+                del self.cached_registry_proto.entities[idx]
+                if commit:
+                    self.commit()
+                return
+
+        raise EntityNotFoundException(name, project)
+
+    def apply_saved_dataset(
+        self, saved_dataset: SavedDataset, project: str, commit: bool = True,
+    ):
+        """
+        Registers a single entity with Feast
+
+        Args:
+            saved_dataset: SavedDataset that will be added / updated to registry
+            project: Feast project that this dataset belongs to
+            commit: Whether the change should be persisted immediately
+        """
+        now = datetime.utcnow()
+        if not saved_dataset.created_timestamp:
+            saved_dataset.created_timestamp = now
+        saved_dataset.last_updated_timestamp = now
+
+        saved_dataset_proto = saved_dataset.to_proto()
+        saved_dataset_proto.spec.project = project
+        self._prepare_registry_for_changes()
+        assert self.cached_registry_proto
+
+        for idx, existing_saved_dataset_proto in enumerate(
+            self.cached_registry_proto.saved_datasets
+        ):
+            if (
+                existing_saved_dataset_proto.spec.name == saved_dataset_proto.spec.name
+                and existing_saved_dataset_proto.spec.project == project
+            ):
+                del self.cached_registry_proto.saved_datasets[idx]
+                break
+
+        self.cached_registry_proto.saved_datasets.append(saved_dataset_proto)
+        if commit:
+            self.commit()
+
+    def get_saved_dataset(
+        self, name: str, project: str, allow_cache: bool = False
+    ) -> SavedDataset:
+        """
+        Retrieves a saved dataset.
+
+        Args:
+            name: Name of dataset
+            project: Feast project that this dataset belongs to
+            allow_cache: Whether to allow returning this dataset from a cached registry
+
+        Returns:
+            Returns either the specified SavedDataset, or raises an exception if
+            none is found
+        """
+        registry_proto = self._get_registry_proto(allow_cache=allow_cache)
+        for saved_dataset in registry_proto.saved_datasets:
+            if (
+                saved_dataset.spec.name == name
+                and saved_dataset.spec.project == project
+            ):
+                return SavedDataset.from_proto(saved_dataset)
+        raise SavedDatasetNotFound(name, project=project)
+
+    def list_saved_datasets(
+        self, project: str, allow_cache: bool = False
+    ) -> List[SavedDataset]:
+        """
+        Retrieves a list of all saved datasets in specified project
+
+        Args:
+            project: Feast project
+            allow_cache: Whether to allow returning this dataset from a cached registry
+
+        Returns:
+            Returns the list of SavedDatasets
+        """
+        registry_proto = self._get_registry_proto(allow_cache=allow_cache)
+        return [
+            SavedDataset.from_proto(saved_dataset)
+            for saved_dataset in registry_proto.saved_datasets
+            if saved_dataset.spec.project == project
+        ]
 
     def commit(self):
         """Commits the state of the registry cache to the remote registry store."""
@@ -642,6 +877,75 @@ class Registry:
         """Tears down (removes) the registry."""
         self._registry_store.teardown()
 
+    def to_dict(self, project: str) -> Dict[str, List[Any]]:
+        """Returns a dictionary representation of the registry contents for the specified project.
+
+        For each list in the dictionary, the elements are sorted by name, so this
+        method can be used to compare two registries.
+
+        Args:
+            project: Feast project to convert to a dict
+        """
+        registry_dict: Dict[str, Any] = defaultdict(list)
+        registry_dict["project"] = project
+        for data_source in sorted(
+            self.list_data_sources(project=project), key=lambda ds: ds.name
+        ):
+            registry_dict["dataSources"].append(
+                self._message_to_sorted_dict(data_source.to_proto())
+            )
+        for entity in sorted(
+            self.list_entities(project=project), key=lambda entity: entity.name
+        ):
+            registry_dict["entities"].append(
+                self._message_to_sorted_dict(entity.to_proto())
+            )
+        for feature_view in sorted(
+            self.list_feature_views(project=project),
+            key=lambda feature_view: feature_view.name,
+        ):
+            registry_dict["featureViews"].append(
+                self._message_to_sorted_dict(feature_view.to_proto())
+            )
+        for feature_service in sorted(
+            self.list_feature_services(project=project),
+            key=lambda feature_service: feature_service.name,
+        ):
+            registry_dict["featureServices"].append(
+                self._message_to_sorted_dict(feature_service.to_proto())
+            )
+        for on_demand_feature_view in sorted(
+            self.list_on_demand_feature_views(project=project),
+            key=lambda on_demand_feature_view: on_demand_feature_view.name,
+        ):
+            odfv_dict = self._message_to_sorted_dict(on_demand_feature_view.to_proto())
+            odfv_dict["spec"]["userDefinedFunction"]["body"] = dill.source.getsource(
+                on_demand_feature_view.udf
+            )
+            registry_dict["onDemandFeatureViews"].append(odfv_dict)
+        for request_feature_view in sorted(
+            self.list_request_feature_views(project=project),
+            key=lambda request_feature_view: request_feature_view.name,
+        ):
+            registry_dict["requestFeatureViews"].append(
+                self._message_to_sorted_dict(request_feature_view.to_proto())
+            )
+        for saved_dataset in sorted(
+            self.list_saved_datasets(project=project), key=lambda item: item.name
+        ):
+            registry_dict["savedDatasets"].append(
+                self._message_to_sorted_dict(saved_dataset.to_proto())
+            )
+        for infra_object in sorted(self.get_infra(project=project).infra_objects):
+            registry_dict["infra"].append(
+                self._message_to_sorted_dict(infra_object.to_proto())
+            )
+        return registry_dict
+
+    @staticmethod
+    def _message_to_sorted_dict(message: Message) -> Dict[str, Any]:
+        return json.loads(MessageToJson(message, sort_keys=True))
+
     def _prepare_registry_for_changes(self):
         """Prepares the Registry for changes by refreshing the cache if necessary."""
         try:
@@ -650,7 +954,7 @@ class Registry:
             registry_proto = RegistryProto()
             registry_proto.registry_schema_version = REGISTRY_SCHEMA_VERSION
             self.cached_registry_proto = registry_proto
-            self.cached_registry_proto_created = datetime.now()
+            self.cached_registry_proto_created = datetime.utcnow()
         return self.cached_registry_proto
 
     def _get_registry_proto(self, allow_cache: bool = False) -> RegistryProto:
@@ -661,30 +965,31 @@ class Registry:
 
         Returns: Returns a RegistryProto object which represents the state of the registry
         """
-        expired = (
-            self.cached_registry_proto is None
-            or self.cached_registry_proto_created is None
-        ) or (
-            self.cached_registry_proto_ttl.total_seconds() > 0  # 0 ttl means infinity
-            and (
-                datetime.now()
-                > (self.cached_registry_proto_created + self.cached_registry_proto_ttl)
+        with self._refresh_lock:
+            expired = (
+                self.cached_registry_proto is None
+                or self.cached_registry_proto_created is None
+            ) or (
+                self.cached_registry_proto_ttl.total_seconds()
+                > 0  # 0 ttl means infinity
+                and (
+                    datetime.utcnow()
+                    > (
+                        self.cached_registry_proto_created
+                        + self.cached_registry_proto_ttl
+                    )
+                )
             )
-        )
-        if allow_cache and (not expired or self.cache_being_updated):
-            assert isinstance(self.cached_registry_proto, RegistryProto)
-            return self.cached_registry_proto
 
-        try:
-            self.cache_being_updated = True
+            if allow_cache and not expired:
+                assert isinstance(self.cached_registry_proto, RegistryProto)
+                return self.cached_registry_proto
+
             registry_proto = self._registry_store.get_registry_proto()
             self.cached_registry_proto = registry_proto
-            self.cached_registry_proto_created = datetime.now()
-        except Exception as e:
-            raise e
-        finally:
-            self.cache_being_updated = False
-        return registry_proto
+            self.cached_registry_proto_created = datetime.utcnow()
+
+            return registry_proto
 
     def _check_conflicting_feature_view_names(self, feature_view: BaseFeatureView):
         name_to_fv_protos = self._existing_feature_view_names_to_fvs()

@@ -13,25 +13,24 @@
 # limitations under the License.
 import glob
 import os
+import pathlib
 import re
 import shutil
 import subprocess
-import pathlib
-
 from distutils.cmd import Command
+from pathlib import Path
+from subprocess import CalledProcessError
+
 from setuptools import find_packages
 
 try:
     from setuptools import setup
-    from setuptools.command.install import install
-    from setuptools.command.develop import develop
-    from setuptools.command.egg_info import egg_info
-    from setuptools.command.sdist import sdist
     from setuptools.command.build_py import build_py
+    from setuptools.command.develop import develop
+    from setuptools.command.install import install
 except ImportError:
-    from distutils.core import setup
-    from distutils.command.install import install
     from distutils.command.build_py import build_py
+    from distutils.core import setup
 
 NAME = "mk-feature-store"
 DESCRIPTION = "Python SDK for Feast"
@@ -40,20 +39,21 @@ AUTHOR = "Feast"
 REQUIRES_PYTHON = ">=3.7.0"
 
 REQUIRED = [
-    "Click==7.*",
+    "Click>=7.*",
     "colorama>=0.3.9",
     "dill==0.3.*",
     "fastavro>=1.1.0",
     "google-api-core>=1.23.0",
     "googleapis-common-protos==1.52.*",
     "grpcio>=1.34.0",
-    "grpcio-reflection>=1.34.0"
+    "grpcio-reflection>=1.34.0",
     "Jinja2>=2.0.0",
     "jsonschema",
     "mmh3",
     "pandas>=1.0.0",
     "pandavro==1.5.*",
     "protobuf>=3.10",
+    "proto-plus<1.19.7",
     "pyarrow>=4.0.0",
     "pydantic>=1.0.0",
     "PyYAML>=5.4.*",
@@ -63,6 +63,9 @@ REQUIRED = [
     "tqdm==4.*",
     "fastapi>=0.68.0",
     "uvicorn[standard]>=0.14.0",
+    "proto-plus<1.19.7",
+    "tensorflow-metadata>=1.0.0,<2.0.0",
+    "dask>=2021.*,<2022.02.0",
 ]
 
 GCP_REQUIRED = [
@@ -70,63 +73,90 @@ GCP_REQUIRED = [
     "google-cloud-bigquery-storage >= 2.0.0",
     "google-cloud-datastore>=2.1.*",
     "google-cloud-storage>=1.34.*,<1.41",
-    "google-cloud-core==1.4.*",
+    "google-cloud-core>=1.4.0,<2.0.0",
 ]
 
 REDIS_REQUIRED = [
-    "redis-py-cluster==2.1.2",
+    "redis==3.5.3",
+    "redis-py-cluster>=2.1.3",
+    "hiredis>=2.0.0",
 ]
 
 AWS_REQUIRED = [
-    "boto3==1.17.*",
+    "boto3>=1.17.0",
     "docker>=5.0.2",
 ]
 
-CI_REQUIRED = [
-    "cryptography==3.3.2",
-    "flake8",
-    "black==19.10b0",
-    "isort>=5",
-    "grpcio-tools==1.34.0",
-    "grpcio-testing==1.34.0",
-    "minio==7.1.0",
-    "mock==2.0.0",
-    "moto",
-    "mypy==0.790",
-    "mypy-protobuf==1.24",
-    "avro==1.10.0",
-    "gcsfs",
-    "urllib3>=1.25.4",
-    "pytest==6.0.0",
-    "pytest-cov",
-    "pytest-xdist",
-    "pytest-benchmark>=3.4.1",
-    "pytest-lazy-fixture==0.6.3",
-    "pytest-timeout==1.4.2",
-    "pytest-ordering==0.6.*",
-    "pytest-mock==1.10.4",
-    "Sphinx!=4.0.0",
-    "sphinx-rtd-theme",
-    "testcontainers==3.4.2",
-    "adlfs==0.5.9",
-    "firebase-admin==4.5.2",
-    "pre-commit",
-    "assertpy==1.1",
-    "google-cloud-bigquery>=2.28.1",
-    "google-cloud-bigquery-storage >= 2.0.0",
-    "google-cloud-datastore>=2.1.*",
-    "google-cloud-storage>=1.20.*,<1.41",
-    "google-cloud-core==1.4.*",
-    "redis-py-cluster==2.1.2",
-    "boto3==1.17.*",
+SNOWFLAKE_REQUIRED = [
+    "snowflake-connector-python[pandas]>=2.7.3",
 ]
+
+SPARK_REQUIRED = [
+    "pyspark>=3.0.0",
+]
+
+GE_REQUIRED = [
+    "great_expectations>=0.14.0,<0.15.0"
+]
+
+CI_REQUIRED = (
+    [
+        "cryptography==3.3.2",
+        "flake8",
+        "black==19.10b0",
+        "isort>=5",
+        "grpcio-tools==1.34.0",
+        "grpcio-testing==1.34.0",
+        "minio==7.1.0",
+        "mock==2.0.0",
+        "moto",
+        "mypy==0.931",
+        "mypy-protobuf==3.1.0",
+        "avro==1.10.0",
+        "gcsfs",
+        "urllib3>=1.25.4",
+        "psutil==5.9.0",
+        "pytest>=6.0.0",
+        "pytest-cov",
+        "pytest-xdist",
+        "pytest-benchmark>=3.4.1",
+        "pytest-lazy-fixture==0.6.3",
+        "pytest-timeout==1.4.2",
+        "pytest-ordering==0.6.*",
+        "pytest-mock==1.10.4",
+        "Sphinx!=4.0.0,<4.4.0",
+        "sphinx-rtd-theme",
+        "testcontainers==3.4.2",
+        "adlfs==0.5.9",
+        "firebase-admin==4.5.2",
+        "pre-commit",
+        "assertpy==1.1",
+        "pip-tools",
+        "types-protobuf",
+        "types-python-dateutil",
+        "types-pytz",
+        "types-PyYAML",
+        "types-redis",
+        "types-requests",
+        "types-setuptools",
+        "types-tabulate",
+    ]
+        + GCP_REQUIRED
+        + REDIS_REQUIRED
+        + AWS_REQUIRED
+        + SNOWFLAKE_REQUIRED
+        + SPARK_REQUIRED
+        + GE_REQUIRED
+)
+
+DEV_REQUIRED = ["mypy-protobuf>=3.1.0", "grpcio-testing==1.*"] + CI_REQUIRED
 
 # Get git repo root directory
 repo_root = str(pathlib.Path(__file__).resolve().parent.parent.parent)
 
 # README file from Feast repo root directory
 README_FILE = os.path.join(repo_root, "README.md")
-with open(README_FILE, "r") as f:
+with open(README_FILE, "r", encoding="utf8") as f:
     LONG_DESCRIPTION = f.read()
 
 # Add Support for parsing tags that have a prefix containing '/' (ie 'sdk/go') to setuptools_scm.
@@ -142,53 +172,172 @@ if shutil.which("git"):
 else:
     use_scm_version = None
 
+PROTO_SUBDIRS = ["core", "serving", "types", "storage"]
 
-class BuildProtoCommand(Command):
-    description = "Builds the proto files into python files."
+
+class BuildPythonProtosCommand(Command):
+    description = "Builds the proto files into Python files."
+    user_options = []
 
     def initialize_options(self):
-        self.protoc = ["python", "-m", "grpc_tools.protoc"]  # find_executable("protoc")
+        self.python_protoc = [
+            "python",
+            "-m",
+            "grpc_tools.protoc",
+        ]  # find_executable("protoc")
         self.proto_folder = os.path.join(repo_root, "protos")
-        self.this_package = os.path.join(os.path.dirname(__file__) or os.getcwd(), 'feast/protos')
-        self.sub_folders = ["core", "serving", "types", "storage"]
+        self.python_folder = os.path.join(
+            os.path.dirname(__file__) or os.getcwd(), "feast/protos"
+        )
+        self.sub_folders = PROTO_SUBDIRS
 
     def finalize_options(self):
         pass
 
-    def _generate_protos(self, path):
+    def _generate_python_protos(self, path: str):
         proto_files = glob.glob(os.path.join(self.proto_folder, path))
-
-        subprocess.check_call(self.protoc + [
-            '-I', self.proto_folder,
-            '--python_out', self.this_package,
-            '--grpc_python_out', self.this_package,
-            '--mypy_out', self.this_package] + proto_files)
+        Path(self.python_folder).mkdir(exist_ok=True)
+        subprocess.check_call(
+            self.python_protoc
+            + [
+                "-I",
+                self.proto_folder,
+                "--python_out",
+                self.python_folder,
+                "--grpc_python_out",
+                self.python_folder,
+                "--mypy_out",
+                self.python_folder,
+            ]
+            + proto_files,
+        )
 
     def run(self):
         for sub_folder in self.sub_folders:
-            self._generate_protos(f'feast/{sub_folder}/*.proto')
+            self._generate_python_protos(f"feast/{sub_folder}/*.proto")
+            # We need the __init__ files for each of the generated subdirs
+            # so that they are regular packages, and don't need the `--namespace-packages` flags
+            # when being typechecked using mypy. BUT, we need to exclude `types` because that clashes
+            # with an existing module in the python standard library.
+            if sub_folder == "types":
+                continue
+            with open(f"{self.python_folder}/feast/{sub_folder}/__init__.py", 'w'):
+                pass
 
-        from pathlib import Path
-
-        for path in Path('feast/protos').rglob('*.py'):
+        for path in Path("feast/protos").rglob("*.py"):
             for folder in self.sub_folders:
                 # Read in the file
-                with open(path, 'r') as file:
+                with open(path, "r") as file:
                     filedata = file.read()
 
                 # Replace the target string
-                filedata = filedata.replace(f'from feast.{folder}', f'from feast.protos.feast.{folder}')
+                filedata = filedata.replace(
+                    f"from feast.{folder}", f"from feast.protos.feast.{folder}"
+                )
 
                 # Write the file out again
-                with open(path, 'w') as file:
+                with open(path, "w") as file:
                     file.write(filedata)
+
+
+def _generate_path_with_gopath():
+    go_path = subprocess.check_output(["go", "env", "GOPATH"]).decode("utf-8")
+    go_path = go_path.strip()
+    path_val = os.getenv("PATH")
+    path_val = f"{path_val}:{go_path}/bin"
+
+    return path_val
+
+
+def _ensure_go_and_proto_toolchain():
+    try:
+        version = subprocess.check_output(["go", "version"])
+    except Exception as e:
+        raise RuntimeError("Unable to find go toolchain") from e
+
+    semver_string = re.search(r"go[\S]+", str(version)).group().lstrip("go")
+    parts = semver_string.split(".")
+    if not (int(parts[0]) >= 1 and int(parts[1]) >= 16):
+        raise RuntimeError(f"Go compiler too old; expected 1.16+ found {semver_string}")
+
+    path_val = _generate_path_with_gopath()
+
+    try:
+        subprocess.check_call(["protoc-gen-go", "--version"], env={
+            "PATH": path_val
+        })
+        subprocess.check_call(["protoc-gen-go-grpc", "--version"], env={
+            "PATH": path_val
+        })
+    except Exception as e:
+        raise RuntimeError("Unable to find go/grpc extensions for protoc") from e
+
+
+class BuildGoProtosCommand(Command):
+    description = "Builds the proto files into Go files."
+    user_options = []
+
+
+    def initialize_options(self):
+        self.go_protoc = [
+            "python",
+            "-m",
+            "grpc_tools.protoc",
+        ]  # find_executable("protoc")
+        self.proto_folder = os.path.join(repo_root, "protos")
+        self.go_folder = os.path.join(repo_root, "go/protos")
+        self.sub_folders = PROTO_SUBDIRS
+        self.path_val = _generate_path_with_gopath()
+
+    def finalize_options(self):
+        pass
+
+    def _generate_go_protos(self, path: str):
+        proto_files = glob.glob(os.path.join(self.proto_folder, path))
+
+        try:
+            subprocess.check_call(
+                self.go_protoc
+                + ["-I", self.proto_folder,
+                   "--go_out", self.go_folder,
+                   "--go_opt=module=github.com/feast-dev/feast/go/protos",
+                   "--go-grpc_out", self.go_folder,
+                   "--go-grpc_opt=module=github.com/feast-dev/feast/go/protos"]
+                + proto_files,
+                env={
+                    "PATH": self.path_val
+                }
+            )
+        except CalledProcessError as e:
+            print(f"Stderr: {e.stderr}")
+            print(f"Stdout: {e.stdout}")
+
+    def _compile_go_feature_server(self):
+        print("Compile go feature server")
+        subprocess.check_call(["go",
+                               "build",
+                               "-work",
+                               "-x",
+                               "-o",
+                               f"{repo_root}/sdk/python/feast/binaries/server",
+                               f"github.com/feast-dev/feast/go/cmd/server"])
+
+    def run(self):
+        go_dir = Path(repo_root) / "go" / "protos"
+        go_dir.mkdir(exist_ok=True)
+        for sub_folder in self.sub_folders:
+            self._generate_go_protos(f"feast/{sub_folder}/*.proto")
+        self._compile_go_feature_server()
 
 
 class BuildCommand(build_py):
     """Custom build command."""
 
     def run(self):
-        self.run_command('build_proto')
+        self.run_command("build_python_protos")
+        if os.getenv("COMPILE_GO", "false").lower() == "true":
+            _ensure_go_and_proto_toolchain()
+            self.run_command("build_go_protos")
         build_py.run(self)
 
 
@@ -196,7 +345,10 @@ class DevelopCommand(develop):
     """Custom develop command."""
 
     def run(self):
-        self.run_command('build_proto')
+        self.run_command("build_python_protos")
+        if os.getenv("COMPILE_GO", "false").lower() == "true":
+            _ensure_go_and_proto_toolchain()
+            self.run_command("build_go_protos")
         develop.run(self)
 
 
@@ -213,11 +365,14 @@ setup(
     # https://stackoverflow.com/questions/28509965/setuptools-development-requirements
     # Install dev requirements with: pip install -e .[dev]
     extras_require={
-        "dev": ["mypy-protobuf==1.*", "grpcio-testing==1.*"],
+        "dev": DEV_REQUIRED,
         "ci": CI_REQUIRED,
         "gcp": GCP_REQUIRED,
         "aws": AWS_REQUIRED,
         "redis": REDIS_REQUIRED,
+        "snowflake": SNOWFLAKE_REQUIRED,
+        "spark": SPARK_REQUIRED,
+        "ge": GE_REQUIRED,
     },
     include_package_data=True,
     license="Apache",
@@ -230,20 +385,30 @@ setup(
         "Programming Language :: Python :: 3.7",
     ],
     entry_points={"console_scripts": ["feast=feast.cli:cli"]},
+<<<<<<< HEAD
     version="0.14.2",
     #use_scm_version=use_scm_version,
     setup_requires=["setuptools_scm", "grpcio", "grpcio-tools==1.34.0", "mypy-protobuf", "sphinx!=4.0.0"],
+=======
+    use_scm_version=use_scm_version,
+    setup_requires=[
+        "setuptools_scm",
+        "grpcio",
+        "grpcio-tools==1.34.0",
+        "mypy-protobuf==3.1.0",
+        "sphinx!=4.0.0",
+    ],
+>>>>>>> 2ad0e9bf4f1cb7a0af551323957e7dc529dc7dcb
     package_data={
         "": [
             "protos/feast/**/*.proto",
             "protos/feast/third_party/grpc/health/v1/*.proto",
-            "protos/tensorflow_metadata/proto/v0/*.proto",
             "feast/protos/feast/**/*.py",
-            "tensorflow_metadata/proto/v0/*.py"
         ],
     },
     cmdclass={
-        "build_proto": BuildProtoCommand,
+        "build_python_protos": BuildPythonProtosCommand,
+        "build_go_protos": BuildGoProtosCommand,
         "build_py": BuildCommand,
         "develop": DevelopCommand,
     },

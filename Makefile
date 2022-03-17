@@ -15,8 +15,7 @@
 #
 
 ROOT_DIR 	:= $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
-PROTO_TYPE_SUBDIRS = core serving types storage
-PROTO_SERVICE_SUBDIRS = core serving
+MVN := mvn -f java/pom.xml ${MAVEN_EXTRA_OPTS}
 OS := linux
 ifeq ($(shell uname -s), Darwin)
 	OS = osx
@@ -24,36 +23,43 @@ endif
 
 # General
 
-format: format-python format-go
+format: format-python format-java format-go
 
-lint: lint-python lint-go
+lint: lint-python lint-java lint-go
 
-test: test-python test-go
+test: test-python test-java test-go
 
 protos: compile-protos-go compile-protos-python compile-protos-docs
 
-build: protos build-docker build-html
-
-install-ci-dependencies: install-python-ci-dependencies install-go-ci-dependencies
+build: protos build-java build-docker build-html
 
 # Python SDK
 
-install-python-ci-dependencies:
-	pip install -e "sdk/python[ci]"
+install-python-ci-dependencies: install-go-proto-dependencies
+	cd sdk/python && python -m piptools sync requirements/py$(PYTHON)-ci-requirements.txt
+	cd sdk/python && COMPILE_GO=true python setup.py develop
+
+lock-python-ci-dependencies:
+	cd sdk/python && python -m piptools compile -U --extra ci --output-file requirements/py$(PYTHON)-ci-requirements.txt
 
 package-protos:
 	cp -r ${ROOT_DIR}/protos ${ROOT_DIR}/sdk/python/feast/protos
 
 compile-protos-python:
-	@$(foreach dir,$(PROTO_TYPE_SUBDIRS),cd ${ROOT_DIR}/protos; python -m grpc_tools.protoc -I. --grpc_python_out=../sdk/python/feast/protos/ --python_out=../sdk/python/feast/protos/ --mypy_out=../sdk/python/feast/protos/ feast/$(dir)/*.proto;)
-	@$(foreach dir,$(PROTO_TYPE_SUBDIRS),grep -rli 'from feast.$(dir)' sdk/python/feast/protos | xargs -I@ sed -i.bak 's/from feast.$(dir)/from feast.protos.feast.$(dir)/g' @;)
-	cd ${ROOT_DIR}/protos; python -m grpc_tools.protoc -I. --python_out=../sdk/python/ --mypy_out=../sdk/python/ tensorflow_metadata/proto/v0/*.proto
+	python sdk/python/setup.py build_python_protos
 
 install-python:
-	python -m pip install -e sdk/python -U --use-deprecated=legacy-resolver
+	cd sdk/python && python -m piptools sync requirements/py$(PYTHON)-requirements.txt
+	cd sdk/python && python setup.py develop
+
+lock-python-dependencies:
+	cd sdk/python && python -m piptools compile -U --output-file requirements/py$(PYTHON)-requirements.txt
 
 benchmark-python:
 	FEAST_USAGE=False IS_TEST=True python -m pytest --integration --benchmark  --benchmark-autosave --benchmark-save-data sdk/python/tests
+
+benchmark-python-local:
+	FEAST_USAGE=False IS_TEST=True FEAST_IS_LOCAL_TEST=True python -m pytest --integration --benchmark  --benchmark-autosave --benchmark-save-data sdk/python/tests
 
 test-python:
 	FEAST_USAGE=False IS_TEST=True python -m pytest -n 8 sdk/python/tests
@@ -61,8 +67,22 @@ test-python:
 test-python-integration:
 	FEAST_USAGE=False IS_TEST=True python -m pytest -n 8 --integration sdk/python/tests
 
+test-python-universal-contrib:
+	PYTHONPATH='.' FULL_REPO_CONFIGS_MODULE=sdk.python.feast.infra.offline_stores.contrib.contrib_repo_configuration FEAST_USAGE=False IS_TEST=True python -m pytest -n 8 --integration --universal sdk/python/tests
+
+test-python-universal-local:
+	FEAST_USAGE=False IS_TEST=True FEAST_IS_LOCAL_TEST=True python -m pytest -n 8 --integration --universal sdk/python/tests
+
 test-python-universal:
 	FEAST_USAGE=False IS_TEST=True python -m pytest -n 8 --integration --universal sdk/python/tests
+
+test-python-go-server:
+	go build -o ${ROOT_DIR}/sdk/python/feast/binaries/server github.com/feast-dev/feast/go/cmd/server
+	FEAST_USAGE=False IS_TEST=True python -m pytest -n 8 --integration --goserver sdk/python/tests
+
+test-python-go-server-lifecycle:
+	go build -o ${ROOT_DIR}/sdk/python/feast/binaries/server github.com/feast-dev/feast/go/cmd/server
+	FEAST_USAGE=False IS_TEST=True python -m pytest -n 8 --integration --goserverlifecycle sdk/python/tests
 
 format-python:
 	# Sort
@@ -77,41 +97,91 @@ lint-python:
 	cd ${ROOT_DIR}/sdk/python; python -m flake8 feast/ tests/
 	cd ${ROOT_DIR}/sdk/python; python -m black --check feast tests
 
+# Java
+
+install-java-ci-dependencies:
+	${MVN} verify clean --fail-never
+
+format-java:
+	${MVN} spotless:apply
+
+lint-java:
+	${MVN} --no-transfer-progress spotless:check
+
+test-java:
+	${MVN} --no-transfer-progress -DskipITs=true test
+
+test-java-integration:
+	${MVN} --no-transfer-progress -Dmaven.javadoc.skip=true -Dgpg.skip -DskipUTs=true clean verify
+
+test-java-with-coverage:
+	${MVN} --no-transfer-progress -DskipITs=true test jacoco:report-aggregate
+
+build-java:
+	${MVN} clean verify
+
+build-java-no-tests:
+	${MVN} --no-transfer-progress -Dmaven.javadoc.skip=true -Dgpg.skip -DskipUTs=true -DskipITs=true -Drevision=${REVISION} clean package
+
 # Go SDK
 
-install-go-ci-dependencies:
-	go get -u github.com/golang/protobuf/protoc-gen-go
-	go get -u golang.org/x/lint/golint
+install-go-proto-dependencies:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.26.0
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.1.0
 
-compile-protos-go:
-	cd ${ROOT_DIR}/protos; protoc -I/usr/local/include -I. --go_out=plugins=grpc,paths=source_relative:../sdk/go/protos/ tensorflow_metadata/proto/v0/*.proto
-	$(foreach dir,types serving core storage,cd ${ROOT_DIR}/protos; protoc -I/usr/local/include -I. --go_out=plugins=grpc,paths=source_relative:../sdk/go/protos feast/$(dir)/*.proto;)
+install-protoc-dependencies:
+	pip install grpcio-tools==1.34.0
 
-test-go:
-	cd ${ROOT_DIR}/sdk/go; go test ./...
+compile-protos-go: install-go-proto-dependencies install-protoc-dependencies
+	python sdk/python/setup.py build_go_protos
+
+compile-go-feature-server: compile-protos-go
+	go mod tidy
+	go build -o ${ROOT_DIR}/sdk/python/feast/binaries/server github.com/feast-dev/feast/go/cmd/server
+
+test-go: compile-protos-go
+	go test ./...
 
 format-go:
-	cd ${ROOT_DIR}/sdk/go; gofmt -s -w *.go
+	gofmt -s -w go/
 
-lint-go:
-	cd ${ROOT_DIR}/sdk/go; go vet
+lint-go: compile-protos-go
+	go vet ./go/internal/feast ./go/cmd/server
 
 # Docker
 
-build-push-docker:
-	@$(MAKE) build-docker registry=$(REGISTRY) version=$(VERSION)
-	@$(MAKE) push-ci-docker registry=$(REGISTRY) version=$(VERSION)
-
-build-docker: build-ci-docker
+build-docker: build-ci-docker build-feature-server-python-aws-docker build-feature-transformation-server-docker build-feature-server-java-docker
 
 push-ci-docker:
 	docker push $(REGISTRY)/feast-ci:$(VERSION)
 
+# TODO(adchia): consider removing. This doesn't run successfully right now
 build-ci-docker:
 	docker build -t $(REGISTRY)/feast-ci:$(VERSION) -f infra/docker/ci/Dockerfile .
 
-build-local-test-docker:
-	docker build -t feast:local -f infra/docker/tests/Dockerfile .
+push-feature-server-python-aws-docker:
+		docker push $(REGISTRY)/feature-server-python-aws:$$VERSION
+
+build-feature-server-python-aws-docker:
+		docker build --build-arg VERSION=$$VERSION \
+			-t $(REGISTRY)/feature-server-python-aws:$$VERSION \
+			-f sdk/python/feast/infra/feature_servers/aws_lambda/Dockerfile .
+
+push-feature-transformation-server-docker:
+	docker push $(REGISTRY)/feature-transformation-server:$(VERSION)
+
+build-feature-transformation-server-docker:
+	docker build --build-arg VERSION=$(VERSION) \
+		-t $(REGISTRY)/feature-transformation-server:$(VERSION) \
+		-f sdk/python/feast/infra/transformation_servers/Dockerfile .
+
+push-feature-server-java-docker:
+	docker push $(REGISTRY)/feature-server-java:$(VERSION)
+
+build-feature-server-java-docker:
+	docker build --build-arg VERSION=$(VERSION) \
+		-t $(REGISTRY)/feature-server-java:$(VERSION) \
+		-f java/infra/docker/feature-server/Dockerfile .
 
 # Documentation
 

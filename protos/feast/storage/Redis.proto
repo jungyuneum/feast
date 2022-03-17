@@ -16,14 +16,13 @@
 
 syntax = "proto3";
 
-import "feast/types/Field.proto";
 import "feast/types/Value.proto";
 
 package feast.storage;
 
 option java_outer_classname = "RedisProto";
 option java_package = "feast.proto.storage";
-option go_package = "github.com/feast-dev/feast/sdk/go/protos/feast/storage";
+option go_package = "github.com/feast-dev/feast/go/protos/feast/storage";
 
 message RedisKeyV2 {
   string project = 1;

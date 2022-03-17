@@ -1,16 +1,14 @@
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Union
+from typing import List
 
-import pytz
-
-from feast import FeatureTable
-from feast.feature_view import FeatureView
+from feast.infra.infra_object import Infra, InfraObject
 from feast.infra.passthrough_provider import PassthroughProvider
 from feast.protos.feast.core.Registry_pb2 import Registry as RegistryProto
 from feast.registry_store import RegistryStore
-from feast.repo_config import RegistryConfig
+from feast.repo_config import RegistryConfig, RepoConfig
+from feast.usage import log_exceptions_and_usage
 
 
 class LocalProvider(PassthroughProvider):
@@ -18,18 +16,16 @@ class LocalProvider(PassthroughProvider):
     This class only exists for backwards compatibility.
     """
 
-    pass
-
-
-def _table_id(project: str, table: Union[FeatureTable, FeatureView]) -> str:
-    return f"{project}_{table.name}"
-
-
-def _to_naive_utc(ts: datetime):
-    if ts.tzinfo is None:
-        return ts
-    else:
-        return ts.astimezone(pytz.utc).replace(tzinfo=None)
+    def plan_infra(
+        self, config: RepoConfig, desired_registry_proto: RegistryProto
+    ) -> Infra:
+        infra = Infra()
+        if self.online_store:
+            infra_objects: List[InfraObject] = self.online_store.plan(
+                config, desired_registry_proto
+            )
+            infra.infra_objects += infra_objects
+        return infra
 
 
 class LocalRegistryStore(RegistryStore):
@@ -40,6 +36,7 @@ class LocalRegistryStore(RegistryStore):
         else:
             self._filepath = repo_path.joinpath(registry_path)
 
+    @log_exceptions_and_usage(registry="local")
     def get_registry_proto(self):
         registry_proto = RegistryProto()
         if self._filepath.exists():
@@ -49,6 +46,7 @@ class LocalRegistryStore(RegistryStore):
             f'Registry not found at path "{self._filepath}". Have you run "feast apply"?'
         )
 
+    @log_exceptions_and_usage(registry="local")
     def update_registry_proto(self, registry_proto: RegistryProto):
         self._write_registry(registry_proto)
 
@@ -65,4 +63,5 @@ class LocalRegistryStore(RegistryStore):
         registry_proto.last_updated.FromDatetime(datetime.utcnow())
         file_dir = self._filepath.parent
         file_dir.mkdir(exist_ok=True)
-        self._filepath.write_bytes(registry_proto.SerializeToString())
+        with open(self._filepath, mode="wb", buffering=0) as f:
+            f.write(registry_proto.SerializeToString())

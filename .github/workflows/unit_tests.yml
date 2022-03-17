@@ -20,6 +20,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           architecture: x64
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17.7
       - name: Upgrade pip version
         run: |
           pip install --upgrade "pip>=21.3.1"
@@ -34,12 +39,22 @@ jobs:
             ${{ steps.pip-cache.outputs.dir }}
             /opt/hostedtoolcache/Python
             /Users/runner/hostedtoolcache/Python
-          key: ${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-pip-${{ hashFiles('**/setup.py') }}
+          key: ${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-pip-${{ hashFiles(format('**/py{0}-ci-requirements.txt', env.PYTHON)) }}
           restore-keys: |
             ${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-pip-
+      - name: Install pip-tools
+        run: pip install pip-tools
       - name: Install dependencies
-        run: make install-python-ci-dependencies
+        run: |
+          make compile-protos-go
+          make install-python-ci-dependencies
       - name: Test Python
+        env:
+          SNOWFLAKE_CI_DEPLOYMENT: ${{ secrets.SNOWFLAKE_CI_DEPLOYMENT }}
+          SNOWFLAKE_CI_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+          SNOWFLAKE_CI_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+          SNOWFLAKE_CI_ROLE: ${{ secrets.SNOWFLAKE_CI_ROLE }}
+          SNOWFLAKE_CI_WAREHOUSE: ${{ secrets.SNOWFLAKE_CI_WAREHOUSE }}
         run: FEAST_USAGE=False pytest -n 8 --cov=./ --cov-report=xml --verbose --color=yes sdk/python/tests
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v1
@@ -53,11 +68,23 @@ jobs:
 
   unit-test-go:
     runs-on: ubuntu-latest
-    container: gcr.io/kf-feast/feast-ci:latest
     steps:
       - uses: actions/checkout@v2
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.7
+      - name: Upgrade pip version
+        run: |
+          pip install --upgrade "pip>=21.3.1"
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17.7
       - name: Install dependencies
-        run: make install-go-ci-dependencies
+        run: make install-go-proto-dependencies
       - name: Compile protos
         run: make compile-protos-go
       - name: Test

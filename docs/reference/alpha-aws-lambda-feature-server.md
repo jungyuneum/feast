@@ -3,7 +3,7 @@
 **Warning**: This is an _experimental_ feature. It's intended for early testing and feedback, and could change without warnings in future releases.
 
 {% hint style="info" %}
-To enable this feature, run**`feast alpha enable aws_lambda_feature_server`**
+To enable this feature, run **`feast alpha enable aws_lambda_feature_server`**
 {% endhint %}
 
 ## Overview
@@ -37,13 +37,84 @@ feature_server:
 
 If enabled, the feature server will be deployed during `feast apply`. After it is deployed, the `feast endpoint` CLI command will indicate the server's endpoint.
 
+## Permissions
+
+Feast requires the following permissions in order to deploy and teardown AWS Lambda feature server:
+
+| Permissions                                                                                                                                           | Resources                                                |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------        |
+| <p>lambda:CreateFunction</p><p>lambda:GetFunction</p><p>lambda:DeleteFunction</p><p>lambda:AddPermission</p><p>lambda:UpdateFunctionConfiguration</p> | arn:aws:lambda:\<region>:\<account_id>:function:feast-\* |
+| <p>ecr:CreateRepository</p><p>ecr:DescribeRepositories</p><p>ecr:DeleteRepository</p><p>ecr:PutImage</p><p>ecr:DescribeImages</p><p>ecr:BatchDeleteImage</p><p>ecr:CompleteLayerUpload</p><p>ecr:UploadLayerPart</p><p>ecr:InitiateLayerUpload</p><p>ecr:BatchCheckLayerAvailability</p><p>ecr:GetDownloadUrlForLayer</p><p>ecr:GetRepositoryPolicy</p><p>ecr:SetRepositoryPolicy</p><p>ecr:GetAuthorizationToken</p> | \* |
+| <p>iam:PassRole</p> | arn:aws:iam::\<account_id>:role/<lambda-execution-role-name> |
+| <p>apigateway:*</p> | <p>arn:aws:apigateway:*::/apis/*/routes/*/routeresponses</p><p>arn:aws:apigateway:*::/apis/*/routes/*/routeresponses/*</p><p>arn:aws:apigateway:*::/apis/*/routes/*</p><p>arn:aws:apigateway:*::/apis/*/routes</p><p>arn:aws:apigateway:*::/apis/*/integrations</p><p>arn:aws:apigateway:*::/apis/*/stages/*/routesettings/*</p><p>arn:aws:apigateway:*::/apis/*</p><p>arn:aws:apigateway:*::/apis</p> |
+
+The following inline policy can be used to grant Feast the necessary permissions:
+
+```javascript
+{
+    "Statement": [
+        {
+        Action = [
+          "lambda:CreateFunction",
+          "lambda:GetFunction",
+          "lambda:DeleteFunction",
+          "lambda:AddPermission",
+          "lambda:UpdateFunctionConfiguration",
+        ]
+        Effect = "Allow"
+        Resource = "arn:aws:lambda:<region>:<account_id>:function:feast-*"
+      },
+      {
+        Action = [
+            "ecr:CreateRepository",
+            "ecr:DescribeRepositories",
+            "ecr:DeleteRepository",
+            "ecr:PutImage",
+            "ecr:DescribeImages",
+            "ecr:BatchDeleteImage",
+            "ecr:CompleteLayerUpload",
+            "ecr:UploadLayerPart",
+            "ecr:InitiateLayerUpload",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:GetDownloadUrlForLayer",
+            "ecr:GetRepositoryPolicy",
+            "ecr:SetRepositoryPolicy",
+            "ecr:GetAuthorizationToken"
+        ]
+        Effect = "Allow"
+        Resource = "*"
+      },
+      {
+        Action = "iam:PassRole"
+        Effect = "Allow"
+        Resource = "arn:aws:iam::<account_id>:role/<lambda-execution-role-name>"
+      },
+      {
+        Effect = "Allow"
+        Action = "apigateway:*"
+        Resource = [
+            "arn:aws:apigateway:*::/apis/*/routes/*/routeresponses",
+            "arn:aws:apigateway:*::/apis/*/routes/*/routeresponses/*",
+            "arn:aws:apigateway:*::/apis/*/routes/*",
+            "arn:aws:apigateway:*::/apis/*/routes",
+            "arn:aws:apigateway:*::/apis/*/integrations",
+            "arn:aws:apigateway:*::/apis/*/stages/*/routesettings/*",
+            "arn:aws:apigateway:*::/apis/*",
+            "arn:aws:apigateway:*::/apis",
+        ]
+      },
+    ],
+    "Version": "2012-10-17"
+}
+```
+
 ## Example
 
 After `feature_store.yaml` has been modified as described in the previous section, it can be deployed as follows:
 
 ```bash
 $ feast apply
-10/07/2021 03:57:26 PM INFO:Pulling remote image feastdev/feature-server:aws:
+10/07/2021 03:57:26 PM INFO:Pulling remote image feastdev/feature-server-python-aws:aws:
 10/07/2021 03:57:28 PM INFO:Creating remote ECR repository feast-python-server-key_shark-0_13_1_dev23_gb3c08320:
 10/07/2021 03:57:29 PM INFO:Pushing local image to remote 402087665549.dkr.ecr.us-west-2.amazonaws.com/feast-python-server-key_shark-0_13_1_dev23_gb3c08320:0_13_1_dev23_gb3c08320:
 10/07/2021 03:58:44 PM INFO:Deploying feature server...

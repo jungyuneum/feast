@@ -6,10 +6,9 @@ from typing import Dict, List, Type, Union
 import dill
 import pandas as pd
 
-from feast import errors
 from feast.base_feature_view import BaseFeatureView
 from feast.data_source import RequestDataSource
-from feast.errors import RegistryInferenceFailure
+from feast.errors import RegistryInferenceFailure, SpecifiedFeaturesNotPresentError
 from feast.feature import Feature
 from feast.feature_view import FeatureView
 from feast.feature_view_projection import FeatureViewProjection
@@ -17,6 +16,7 @@ from feast.protos.feast.core.OnDemandFeatureView_pb2 import (
     OnDemandFeatureView as OnDemandFeatureViewProto,
 )
 from feast.protos.feast.core.OnDemandFeatureView_pb2 import (
+    OnDemandFeatureViewMeta,
     OnDemandFeatureViewSpec,
     OnDemandInput,
 )
@@ -44,8 +44,7 @@ class OnDemandFeatureView(BaseFeatureView):
     """
 
     # TODO(adchia): remove inputs from proto and declaration
-    inputs: Dict[str, Union[FeatureView, RequestDataSource]]
-    input_feature_views: Dict[str, FeatureView]
+    input_feature_view_projections: Dict[str, FeatureViewProjection]
     input_request_data_sources: Dict[str, RequestDataSource]
     udf: MethodType
 
@@ -54,21 +53,22 @@ class OnDemandFeatureView(BaseFeatureView):
         self,
         name: str,
         features: List[Feature],
-        inputs: Dict[str, Union[FeatureView, RequestDataSource]],
+        inputs: Dict[str, Union[FeatureView, FeatureViewProjection, RequestDataSource]],
         udf: MethodType,
     ):
         """
         Creates an OnDemandFeatureView object.
         """
         super().__init__(name, features)
-        self.inputs = inputs
-        self.input_feature_views = {}
-        self.input_request_data_sources = {}
+        self.input_feature_view_projections: Dict[str, FeatureViewProjection] = {}
+        self.input_request_data_sources: Dict[str, RequestDataSource] = {}
         for input_ref, odfv_input in inputs.items():
             if isinstance(odfv_input, RequestDataSource):
                 self.input_request_data_sources[input_ref] = odfv_input
+            elif isinstance(odfv_input, FeatureViewProjection):
+                self.input_feature_view_projections[input_ref] = odfv_input
             else:
-                self.input_feature_views[input_ref] = odfv_input
+                self.input_feature_view_projections[input_ref] = odfv_input.projection
 
         self.udf = udf
 
@@ -78,10 +78,36 @@ class OnDemandFeatureView(BaseFeatureView):
 
     def __copy__(self):
         fv = OnDemandFeatureView(
-            name=self.name, features=self.features, inputs=self.inputs, udf=self.udf
+            name=self.name,
+            features=self.features,
+            inputs=dict(
+                **self.input_feature_view_projections, **self.input_request_data_sources
+            ),
+            udf=self.udf,
         )
         fv.projection = copy.copy(self.projection)
         return fv
+
+    def __eq__(self, other):
+        if not super().__eq__(other):
+            return False
+
+        if (
+            not self.input_feature_view_projections
+            == other.input_feature_view_projections
+        ):
+            return False
+
+        if not self.input_request_data_sources == other.input_request_data_sources:
+            return False
+
+        if not self.udf.__code__.co_code == other.udf.__code__.co_code:
+            return False
+
+        return True
+
+    def __hash__(self):
+        return super().__hash__()
 
     def to_proto(self) -> OnDemandFeatureViewProto:
         """
@@ -90,9 +116,16 @@ class OnDemandFeatureView(BaseFeatureView):
         Returns:
             A OnDemandFeatureViewProto protobuf.
         """
+        meta = OnDemandFeatureViewMeta()
+        if self.created_timestamp:
+            meta.created_timestamp.FromDatetime(self.created_timestamp)
+        if self.last_updated_timestamp:
+            meta.last_updated_timestamp.FromDatetime(self.last_updated_timestamp)
         inputs = {}
-        for input_ref, fv in self.input_feature_views.items():
-            inputs[input_ref] = OnDemandInput(feature_view=fv.to_proto())
+        for input_ref, fv_projection in self.input_feature_view_projections.items():
+            inputs[input_ref] = OnDemandInput(
+                feature_view_projection=fv_projection.to_proto()
+            )
         for input_ref, request_data_source in self.input_request_data_sources.items():
             inputs[input_ref] = OnDemandInput(
                 request_data_source=request_data_source.to_proto()
@@ -107,7 +140,7 @@ class OnDemandFeatureView(BaseFeatureView):
             ),
         )
 
-        return OnDemandFeatureViewProto(spec=spec)
+        return OnDemandFeatureViewProto(spec=spec, meta=meta)
 
     @classmethod
     def from_proto(cls, on_demand_feature_view_proto: OnDemandFeatureViewProto):
@@ -128,6 +161,10 @@ class OnDemandFeatureView(BaseFeatureView):
             if on_demand_input.WhichOneof("input") == "feature_view":
                 inputs[input_name] = FeatureView.from_proto(
                     on_demand_input.feature_view
+                ).projection
+            elif on_demand_input.WhichOneof("input") == "feature_view_projection":
+                inputs[input_name] = FeatureViewProjection.from_proto(
+                    on_demand_input.feature_view_projection
                 )
             else:
                 inputs[input_name] = RequestDataSource.from_proto(
@@ -155,6 +192,15 @@ class OnDemandFeatureView(BaseFeatureView):
             on_demand_feature_view_obj
         )
 
+        if on_demand_feature_view_proto.meta.HasField("created_timestamp"):
+            on_demand_feature_view_obj.created_timestamp = (
+                on_demand_feature_view_proto.meta.created_timestamp.ToDatetime()
+            )
+        if on_demand_feature_view_proto.meta.HasField("last_updated_timestamp"):
+            on_demand_feature_view_obj.last_updated_timestamp = (
+                on_demand_feature_view_proto.meta.last_updated_timestamp.ToDatetime()
+            )
+
         return on_demand_feature_view_obj
 
     def get_request_data_schema(self) -> Dict[str, ValueType]:
@@ -164,28 +210,42 @@ class OnDemandFeatureView(BaseFeatureView):
         return schema
 
     def get_transformed_features_df(
-        self, full_feature_names: bool, df_with_features: pd.DataFrame
+        self, df_with_features: pd.DataFrame, full_feature_names: bool = False,
     ) -> pd.DataFrame:
         # Apply on demand transformations
-        # TODO(adchia): Include only the feature values from the specified input FVs in the ODFV.
-        # Copy over un-prefixed features even if not requested since transform may need it
         columns_to_cleanup = []
-        if full_feature_names:
-            for input_fv in self.input_feature_views.values():
-                for feature in input_fv.features:
-                    full_feature_ref = f"{input_fv.name}__{feature.name}"
-                    if full_feature_ref in df_with_features.keys():
-                        df_with_features[feature.name] = df_with_features[
-                            full_feature_ref
-                        ]
-                        columns_to_cleanup.append(feature.name)
+        for input_fv_projection in self.input_feature_view_projections.values():
+            for feature in input_fv_projection.features:
+                full_feature_ref = f"{input_fv_projection.name}__{feature.name}"
+                if full_feature_ref in df_with_features.keys():
+                    # Make sure the partial feature name is always present
+                    df_with_features[feature.name] = df_with_features[full_feature_ref]
+                    columns_to_cleanup.append(feature.name)
+                elif feature.name in df_with_features.keys():
+                    # Make sure the full feature name is always present
+                    df_with_features[full_feature_ref] = df_with_features[feature.name]
+                    columns_to_cleanup.append(full_feature_ref)
 
         # Compute transformed values and apply to each result row
         df_with_transformed_features = self.udf.__call__(df_with_features)
 
+        # Work out whether the correct columns names are used.
+        rename_columns: Dict[str, str] = {}
+        for feature in self.features:
+            short_name = feature.name
+            long_name = f"{self.projection.name_to_use()}__{feature.name}"
+            if (
+                short_name in df_with_transformed_features.columns
+                and full_feature_names
+            ):
+                rename_columns[short_name] = long_name
+            elif not full_feature_names:
+                # Long name must be in dataframe.
+                rename_columns[long_name] = short_name
+
         # Cleanup extra columns used for transformation
         df_with_features.drop(columns=columns_to_cleanup, inplace=True)
-        return df_with_transformed_features
+        return df_with_transformed_features.rename(columns=rename_columns)
 
     def infer_features(self):
         """
@@ -195,10 +255,12 @@ class OnDemandFeatureView(BaseFeatureView):
             RegistryInferenceFailure: The set of features could not be inferred.
         """
         df = pd.DataFrame()
-        for feature_view in self.input_feature_views.values():
-            for feature in feature_view.features:
+        for feature_view_projection in self.input_feature_view_projections.values():
+            for feature in feature_view_projection.features:
                 dtype = feast_value_type_to_pandas_type(feature.dtype)
-                df[f"{feature_view.name}__{feature.name}"] = pd.Series(dtype=dtype)
+                df[f"{feature_view_projection.name}__{feature.name}"] = pd.Series(
+                    dtype=dtype
+                )
                 df[f"{feature.name}"] = pd.Series(dtype=dtype)
         for request_data in self.input_request_data_sources.values():
             for feature_name, feature_type in request_data.schema.items():
@@ -219,7 +281,7 @@ class OnDemandFeatureView(BaseFeatureView):
                 if specified_features not in inferred_features:
                     missing_features.append(specified_features)
             if missing_features:
-                raise errors.SpecifiedFeaturesNotPresentError(
+                raise SpecifiedFeaturesNotPresentError(
                     [f.name for f in missing_features], self.name
                 )
         else:
@@ -245,7 +307,9 @@ class OnDemandFeatureView(BaseFeatureView):
         return requested_on_demand_feature_views
 
 
-def on_demand_feature_view(features: List[Feature], inputs: Dict[str, FeatureView]):
+def on_demand_feature_view(
+    features: List[Feature], inputs: Dict[str, Union[FeatureView, RequestDataSource]]
+):
     """
     Declare an on-demand feature view
 
